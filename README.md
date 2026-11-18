@@ -1,6 +1,6 @@
 CaretakerZ – Co-op Multiplayer (Beta)
 
-Made out of love for The Last Caretaker. 
+Made out of love for The Last Caretaker game. 
 Built for my two kids, perhaps there’s someone else who would like to give it a try.
 
 Early beta: tested with 2 players only, and not yet over Steam between two computers. Expect bugs. Testers and feedback are very welcome!!!
