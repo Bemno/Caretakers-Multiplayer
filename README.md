@@ -81,4 +81,6 @@ Bug reports, ideas and finding someone to play with: [Discord](https://discord.g
 
 ## License
 
-MIT, see [LICENSE](LICENSE). Includes UE4SS (MIT) in the release files.
+Copyright (c) 2026 Bemno. Licensed under the GNU General Public License v3.0, see [LICENSE](LICENSE): you may use, change and share the code, but anything you distribute that is based on it must be released under the same license, with its source. Versions up to 0.2.6 were released under the MIT license.
+
+The release files include UE4SS (MIT license, copyright the UE4SS team).
