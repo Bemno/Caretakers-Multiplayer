@@ -10,15 +10,16 @@ def _tree(tmp_path):
     root = tmp_path / "SaveGames"
     sp = root / SID
     sp.mkdir(parents=True)
-    (root / "Coop").mkdir()
+    store = tmp_path / saves.STORE
+    store.mkdir()
     for n in (0, 1, 5):
         (sp / f"{SID}_{n}.sav").write_bytes(b"sp%d" % n)
     (sp / f"{SID}_AutoSave_0.sav").write_bytes(b"spelarens autosave")
     backups = tmp_path / "SaveGameBackups" / SID
     backups.mkdir(parents=True)
     (backups / f"{SID}_AutoSave_0_2026-11-09_21_57_09.sav").write_bytes(b"gammal backup")
-    (root / "Coop" / "a.sav").write_bytes(b"a")
-    (root / "Coop" / "_klient.sav").write_bytes(b"k")
+    (store / "a.sav").write_bytes(b"a")
+    (store / "_klient.sav").write_bytes(b"k")
     return saves.Saves(str(root / "Coop"))
 
 
@@ -36,20 +37,20 @@ def test_delete_moves_world_aside(tmp_path):
     s = _tree(tmp_path)
     s.delete("a")
     assert s.worlds() == []
-    kept = os.listdir(os.path.join(s.coop, saves.TRASH))
+    kept = os.listdir(os.path.join(s.store, saves.TRASH))
     assert len(kept) == 1 and kept[0].startswith("a_")
 
 
 def test_delete_refuses_client_copy_and_paths(tmp_path):
     import pytest
     s = _tree(tmp_path)
-    (tmp_path / "SaveGames" / "Coop" / "sub").mkdir()
-    (tmp_path / "SaveGames" / "Coop" / "sub" / "b.sav").write_bytes(b"b")
+    (tmp_path / saves.STORE / "sub").mkdir()
+    (tmp_path / saves.STORE / "sub" / "b.sav").write_bytes(b"b")
     for bad in ("_klient", "../a", "sub\\b", "sub/b", "finns-inte"):
         with pytest.raises((ValueError, FileNotFoundError)):
             s.delete(bad)
     assert [n for n, _ in s.worlds()] == ["a"]
-    assert (tmp_path / "SaveGames" / "Coop" / "sub" / "b.sav").exists()
+    assert (tmp_path / saves.STORE / "sub" / "b.sav").exists()
 
 
 def test_rename_world(tmp_path):
@@ -61,7 +62,7 @@ def test_rename_world(tmp_path):
 def test_rename_refuses_taken_and_bad_names(tmp_path):
     import pytest
     s = _tree(tmp_path)
-    (tmp_path / "SaveGames" / "Coop" / "b.sav").write_bytes(b"b")
+    (tmp_path / saves.STORE / "b.sav").write_bytes(b"b")
     for old, new in (("a", "b"), ("a", "../x"), ("a", ""), ("a", "_klient"), ("finns-inte", "c")):
         with pytest.raises((ValueError, FileNotFoundError, FileExistsError)):
             s.rename(old, new)
@@ -72,7 +73,7 @@ def test_import_copies_and_leaves_original(tmp_path):
     s = _tree(tmp_path)
     name = s.import_slot(5)
     assert name.endswith("_import")
-    assert (tmp_path / "SaveGames" / "Coop" / f"{name}.sav").read_bytes() == b"sp5"
+    assert (tmp_path / saves.STORE / f"{name}.sav").read_bytes() == b"sp5"
     assert (tmp_path / "SaveGames" / SID / f"{SID}_5.sav").read_bytes() == b"sp5"
 
 
@@ -127,5 +128,42 @@ def test_guard_survives_restart_and_off_cleans_up(tmp_path):
     s2 = saves.Saves(str(tmp_path / "SaveGames" / "Coop"))
     assert s2.recover_leftover()
     assert (sp / f"{SID}_AutoSave_0.sav").read_bytes() == b"spelarens autosave"
-    assert not (tmp_path / "SaveGames" / "Coop" / ".vakt").exists()
+    assert not (tmp_path / saves.STORE / ".vakt").exists()
     assert s2.recover_leftover() == []
+
+
+def test_worlds_are_outside_savegames_between_sessions(tmp_path):
+    s = _tree(tmp_path)
+    coop = tmp_path / "SaveGames" / "Coop"
+    assert not coop.exists()
+    # The guest receives a new client copy before the session starts.
+    coop.mkdir()
+    (coop / "_klient.sav").write_bytes(b"ny kopia")
+    s.guard_on()
+    assert (coop / "a.sav").read_bytes() == b"a"
+    assert (coop / "_klient.sav").read_bytes() == b"ny kopia"
+    assert [n for n, _ in s.worlds()] == ["a"]
+    (coop / "a.sav").write_bytes(b"a sparad")
+    backups = tmp_path / "SaveGameBackups" / "Coop"
+    backups.mkdir(parents=True)
+    (backups / "a_2026.sav").write_bytes(b"spelets kopia")
+    s.guard_off()
+    assert not coop.exists()
+    assert not backups.exists()
+    store = tmp_path / saves.STORE
+    assert (store / "a.sav").read_bytes() == b"a sparad"
+    assert (store / "_klient.sav").read_bytes() == b"ny kopia"
+    assert (store / saves.BACKUPS / "a_2026.sav").exists()
+    assert [n for n, _ in s.worlds()] == ["a"]
+
+
+def test_leftover_session_moves_worlds_out_and_old_vault_along(tmp_path):
+    s = _tree(tmp_path)
+    s.guard_on()
+    sp = tmp_path / "SaveGames" / SID
+    (sp / f"{SID}_1.sav").write_bytes(b"skrivet i coop")
+    s2 = saves.Saves(str(tmp_path / "SaveGames" / "Coop"))
+    s2.recover_leftover()
+    assert (sp / f"{SID}_1.sav").read_bytes() == b"sp1"
+    assert not (tmp_path / "SaveGames" / "Coop").exists()
+    assert (tmp_path / saves.STORE / "a.sav").exists()

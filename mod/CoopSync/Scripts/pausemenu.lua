@@ -134,9 +134,35 @@ local function hideSaveNotices()
     end
 end
 
+-- The save terminal on the boat's wall shows the game's slot list, which saves
+-- to and loads from the singleplayer slots (user 2026-11-19). In multiplayer every
+-- open slot list has its slots hidden and says where the world is saved instead.
+local lastSlotCheck = 0
+local blockedLists = {}
+local function blockSlotLists()
+    if os.clock() - lastSlotCheck < 0.5 then return end
+    lastSlotCheck = os.clock()
+    local ok, found = pcall(FindObjects, 0, "VoyageSaveGameSlotsWidget", "", 0, RF_CLASS_DEFAULT, false)
+    for _, w in ipairs((ok and found) or {}) do
+        pcall(function()
+            if not (w:IsValid() and w:IsVisible()) then return end
+            w:SetAllSlotVisibility(COLLAPSED)
+            w:SetAllSlotsState(false)
+            pcall(function() w.EmptyTB:SetText(FText(T(lobby.role() == "host" and "slots_host" or "slots_guest"))) end)
+            pcall(function() w.EmptyOverlay:SetVisibility(VISIBLE) end)
+            local a = w:GetAddress()
+            if not blockedLists[a] then
+                blockedLists[a] = true
+                log("spellistan med sparplatser dold i multiplayer: %s", w:GetFName():ToString())
+            end
+        end)
+    end
+end
+
 -- Runs in the world while a multiplayer role is set.
 function M.tick()
     pcall(hideSaveNotices)
+    pcall(blockSlotLists)
     local menu = findMenu()
     if not menu then doneFor, ours, hoverWas, pending = nil, {}, nil, nil return end
     local a = menu:GetAddress()

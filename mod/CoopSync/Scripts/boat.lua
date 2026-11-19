@@ -100,12 +100,39 @@ local function findAnchors(key, actor)
                 elseif n == "Root" then part.root = c:GetFullName():match("%S+%s+(%S+)")
                 elseif c:GetClass():GetFName():ToString() == "VoyageCableComponent" then part.cable = c:GetFullName():match("%S+%s+(%S+)") end
             end
+            part.module = o:GetFullName():match("%S+%s+(%S+)")
             if part.anchor and part.root then list[#list + 1] = part end
         end)
     end
     anchorParts[key] = list
     log("båt %s: %d ankare", key, #list)
     return list
+end
+
+local function anchorDown(part)
+    local ok, down = pcall(function()
+        local m = StaticFindObject(part.module)
+        return m.VoyageAnchor.AnchorDropped or m.AnchorDropped
+    end)
+    return ok and down == true
+end
+
+-- The game that moves the boat: a raised anchor hanging with physics (given by the
+-- mod, see releaseAnchors) is put back under its spool, still.
+local function stowRaisedAnchors(key, actor)
+    local kml = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+    for _, part in ipairs(anchorParts[key] or findAnchors(key, actor)) do
+        if not part.held and part.module and not anchorDown(part) then
+            local a, r = StaticFindObject(part.anchor), StaticFindObject(part.root)
+            if a and a:IsValid() and r and r:IsValid() and a:IsSimulatingPhysics(FName("None")) then
+                a:SetSimulatePhysics(false)
+                a:K2_SetWorldTransform(kml:ComposeTransforms(ANCHOR_IN_ROOT, r:K2_GetComponentToWorld()), false, {}, true)
+                local cable = part.cable and StaticFindObject(part.cable)
+                if cable and cable:IsValid() then pcall(function() cable:Reset() end) end
+                log("båt %s: uppdraget ankare hängde med fysik, tillbaka under spolen", key)
+            end
+        end
+    end
 end
 
 local function holdAnchors(key, actor)
@@ -129,23 +156,47 @@ local function holdAnchors(key, actor)
     end
 end
 
+-- Each anchor is put under its spool before it gets physics back: once they lay
+-- 1.4 km down and 400 m off on their cables, and the boat that took over was
+-- pulled all the way back to where it started (2026-11-19).
 local function releaseAnchors(key)
+    local kml = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+    -- Only held anchors: this runs every tick in the game that moves the boat, and
+    -- putting every anchor under the spool each tick shoved the hull (2026-11-19).
     for _, part in ipairs(anchorParts[key] or {}) do
         local a = part.held and StaticFindObject(part.anchor)
         if a and a:IsValid() then
             pcall(function()
-                a:SetSimulatePhysics(true)
-                a:SetPhysicsLinearVelocity({ X = 0, Y = 0, Z = 0 }, false, FName("None"))
-                a:SetPhysicsAngularVelocityInDegrees({ X = 0, Y = 0, Z = 0 }, false, FName("None"))
+                local r = StaticFindObject(part.root)
+                a:K2_SetWorldTransform(kml:ComposeTransforms(ANCHOR_IN_ROOT, r:K2_GetComponentToWorld()), false, {}, true)
+                local cable = part.cable and StaticFindObject(part.cable)
+                if cable and cable:IsValid() then cable:Reset() end
             end)
+            -- Only a dropped anchor gets physics: a raised one is kept still under its
+            -- spool by the game, and given physics it fell 1.6 km on its cable while the
+            -- boat lay moored (bench 2026-11-19, AnchorSimulating true, AnchorDropped false).
+            if anchorDown(part) then
+                pcall(function()
+                    a:SetSimulatePhysics(true)
+                    a:SetPhysicsLinearVelocity({ X = 0, Y = 0, Z = 0 }, false, FName("None"))
+                    a:SetPhysicsAngularVelocityInDegrees({ X = 0, Y = 0, Z = 0 }, false, FName("None"))
+                end)
+            end
         end
         part.held = nil
     end
 end
 
-local function setHullPhysics(key, actor, on)
+-- The follower keeps its hull's physics and only has its speed zeroed, so taking
+-- over is no sudden switch. Turning it off (18/11-19/11) made the boat that took over
+-- throw itself about and sink; compared on the bench 2026-11-19 (skrovpa.lua, PA=0
+-- turns the old way back on).
+M.keepHullPhysics = true
+
+-- keepAnchors: the follower, which holds its anchors under the spools itself.
+local function setHullPhysics(key, actor, on, force, keepAnchors)
     if on then
-        releaseAnchors(key)
+        if not keepAnchors then releaseAnchors(key) end
         local path = hulls[key]
         if not path then return end
         hulls[key] = nil
@@ -160,7 +211,7 @@ local function setHullPhysics(key, actor, on)
         end
         return
     end
-    if hulls[key] then return end
+    if hulls[key] or (M.keepHullPhysics and not force) then return end
     local b = body(actor)
     if not b then return end
     local ok = pcall(function() b:SetSimulatePhysics(false) end)
@@ -170,6 +221,7 @@ local function setHullPhysics(key, actor, on)
     end
 end
 M.setHullPhysics = setHullPhysics
+function M.anchorParts(key) return anchorParts[key] or {} end
 
 local function stillBody(actor, spinOnly)
     local b = body(actor)
@@ -178,6 +230,31 @@ local function stillBody(actor, spinOnly)
         if not spinOnly then b:SetPhysicsLinearVelocity(ZERO, false, FName("None")) end
         b:SetPhysicsAngularVelocityInDegrees(ZERO, false, FName("None"))
     end)
+end
+
+-- Taking over, the hull gets the speed the other game last sent: the follower's
+-- hull is stilled every frame, and the boat stopped dead at each change of
+-- owner (user 2026-11-19).
+local function inheritMotion(key, actor)
+    local r = remote[key]
+    local b = body(actor)
+    if not (b and r and r.v and now() - r.t < 1.0) then
+        stillBody(actor)
+        return
+    end
+    local ok, err = pcall(function()
+        b:SetPhysicsLinearVelocity({ X = r.v.X, Y = r.v.Y, Z = r.v.Z }, false, FName("None"))
+        b:SetPhysicsAngularVelocityInDegrees({ X = 0, Y = 0, Z = r.v.W }, false, FName("None"))
+    end)
+    log("båt %s: tar med farten %.0f cm/s (%.0f %.0f %.0f), vridning %.1f°/s%s", key,
+        math.sqrt(r.v.X ^ 2 + r.v.Y ^ 2), r.v.X, r.v.Y, r.v.Z, r.v.W, ok and "" or (": " .. tostring(err)))
+end
+
+local function hullSpeed(actor)
+    local b = body(actor)
+    local ok, v = pcall(function() return b:GetPhysicsLinearVelocity(FName("None")) end)
+    if ok and v and v.X then return math.sqrt(v.X ^ 2 + v.Y ^ 2) end
+    return -1
 end
 
 local function describe(key, actor)
@@ -266,7 +343,7 @@ local function sendState(key, actor, driving)
     local h = hold[key]
     if h then
         l = { X = h.x or l.X, Y = h.y or l.Y, Z = h.z }
-        r = { Pitch = h.pitch, Yaw = h.yaw or r.Yaw, Roll = h.roll }
+        r = Rot(h.pitch, h.yaw or r.Yaw, h.roll)
     end
     -- The driven boat once jumped 90° to the left (2026-11-16); a big step in
     -- heading between two sends is logged with its time.
@@ -284,14 +361,14 @@ local function sendState(key, actor, driving)
         local dv = math.sqrt(dx * dx + dy * dy + dz * dz)
         if dv > JOLT_SPEED then
             log("båt %s: ryck %.0f cm/s (%.0f %.0f %.0f) på %.0f ms, lutning %.1f/%.1f, gas %.2f", key, dv, dx, dy, dz,
-                (now() - prev.t) * 1000, r.Pitch or 0, r.Roll or 0, control(actor, "GetThrottleActual"))
+                (now() - prev.t) * 1000, RotP(r) or 0, r.Roll or 0, control(actor, "GetThrottleActual"))
         end
     end
     local okA, anch = pcall(function() return actor.AnchorsDropped end)
-    net.send("boat", key, f1(l.X), f1(l.Y), f1(l.Z), string.format("%.2f", r.Pitch or 0), string.format("%.2f", r.Yaw or 0),
+    net.send("boat", key, f1(l.X), f1(l.Y), f1(l.Z), string.format("%.2f", RotP(r) or 0), string.format("%.2f", r.Yaw or 0),
         string.format("%.2f", r.Roll or 0), f1(v.X), f1(v.Y), f1(v.Z), f1(w.Z), (okA and anch) and 1 or 0, driving and 1 or 0,
         string.format("%.3f", now()), string.format("%.3f", control(actor, "GetThrottleActual")),
-        string.format("%.3f", control(actor, "GetSteeringActual")))
+        string.format("%.3f", control(actor, "GetSteeringActual")), h and 1 or 0)
 end
 
 local lastFollowLog = 0
@@ -536,7 +613,14 @@ local function follow(key, actor, s)
     local buf = s.buf
     if not buf or #buf == 0 or not clockOffset[key] then return end
     setOwnMovement(key, actor, false)
-    setHullPhysics(key, actor, false)
+    -- A boat moored in the other game: the hull's physics off here too. With it on,
+    -- this copy drifted between frames and was put back half the frames, and the
+    -- moored boat shook for this player (2026-11-19).
+    if s.held then
+        setHullPhysics(key, actor, false, true)
+    elseif hulls[key] then
+        setHullPhysics(key, actor, true, nil, true)
+    end
     local t = now()
     clockOffset[key] = M.relaxOffset(clockOffset[key], buf, t - (s.relaxedAt or t))
     s.relaxedAt = t
@@ -561,7 +645,7 @@ local function follow(key, actor, s)
         local root = body(actor) or actor.RootComponent
         local cl, cr = root:K2_GetComponentLocation(), root:K2_GetComponentRotation()
         if math.abs(cl.X - q.x) > 1 or math.abs(cl.Y - q.y) > 1 or math.abs(cl.Z - q.z) > 1
-            or math.abs(wrap((cr.Pitch or 0) - q.pitch)) > 0.1 or math.abs(wrap((cr.Roll or 0) - q.roll)) > 0.1
+            or math.abs(wrap((RotP(cr) or 0) - q.pitch)) > 0.1 or math.abs(wrap((cr.Roll or 0) - q.roll)) > 0.1
             or math.abs(wrap((cr.Yaw or 0) - q.yaw)) > 0.1 then
             lastPlaced[key] = nil
         end
@@ -569,7 +653,7 @@ local function follow(key, actor, s)
     if not samePose(lastPlaced[key], p) then
         local hull = body(actor)
         if M.measure then pcall(measureDrift, key, hull or actor.RootComponent, p) end
-        local loc, rot = { X = p.x, Y = p.y, Z = p.z }, { Pitch = p.pitch, Yaw = p.yaw, Roll = p.roll }
+        local loc, rot = { X = p.x, Y = p.y, Z = p.z }, Rot(p.pitch, p.yaw, p.roll)
         if hull then
             hull:K2_SetWorldLocationAndRotation(loc, rot, false, {}, M.teleport)
             -- The follower's hull has no motion of its own: something pulling
@@ -616,26 +700,255 @@ end
 -- Moored, the boat lies still (user 2026-11-18: in singleplayer it hardly
 -- moves at the quay; in co-op it rode the waves). The game that moves the boat
 -- holds it every frame while a mooring line is plugged at both ends (power.lua
--- sets M.moored): height and tilt from the calm average before mooring, so the
--- lines can still pull it in, and the whole pose once it has stopped moving.
+-- sets M.moored), and the game's lines never move it themselves: let free with
+-- the height held, they pressed the hull into the quay until it was thrown out
+-- (2026-11-19). The user's rules (2026-11-19): one line, the boat stops riding
+-- the waves and is pulled in slowly; a second line, it is pulled for 10 s more
+-- and then locked; with one let go, the other pulls again. The mod does the
+-- pulling, toward the quay ends of the taut lines, with the hull's physics off.
 -- The other game follows the held boat as usual.
 M.moored = false
-local SETTLE_SPEED, SETTLE_SECONDS, REST_TAU = 5, 4, 3
--- power.lua: the mooring lines plugged at both ends (sockets and length).
+-- Test bench (kajmatning.lua): leave the moored boat to the game alone, as in singleplayer.
+M.native = false
+local REST_TAU = 3
+-- The game's own lines in singleplayer pull 12.7 m in 90 s (14 cm/s); the user
+-- wanted it faster (28 felt the same, 2026-11-19).
+local PULL_SPEED = 50
+-- Long enough to reach the quay and swing in straight; it stops by itself when it lies against it.
+local TWO_LINE_SECONDS = 30
+local RELEASE_GRACE = 2
+-- A line pulls until the hull reaches the quay, as in singleplayer, whatever the game
+-- has reeled in: it reels slower than the mod pulls, the line went slack after 6 s and
+-- the boat stopped askew before any corner reached the quay (2026-11-19).
+local PULL_MIN_SPAN = 200
+-- power.lua: the mooring lines plugged at both ends (sockets and length), and their paths.
 M.mooringLines = ""
+M.mooringCables = {}
+
+-- Pulled in as in singleplayer (user 2026-11-19): each taut line drags its socket
+-- toward its quay end and the boat follows as a rigid body. Where a point of the
+-- hull would reach the quay it stops, and the boat turns about it until a second
+-- point touches: a corner first, then the boat swings in straight. Traced from the
+-- hull's outline (Hull_Hull_Geo, measured 2026-11-19: x -2178..2491, y -791..784 in
+-- the boat's frame) at two heights below the bulwark. Before, only the sockets were
+-- traced, and a corner went into the quay and was thrown out at release.
+local MAX_TURN = 3          -- degrees per second
+local QUAY_CLEAR = 60       -- cm kept between hull and quay
+local HULL_POINTS = {}
+for _, x in ipairs({ -2170, -1900, -1600, -1300, -950, -600, -250, 100, 450, 800, 1150, 1500, 1850, 2200, 2480 }) do
+    HULL_POINTS[#HULL_POINTS + 1] = { x = x, y = 784, nx = 0, ny = 1 }
+    HULL_POINTS[#HULL_POINTS + 1] = { x = x, y = -791, nx = 0, ny = -1 }
+end
+for _, y in ipairs({ -700, -350, 0, 350, 700 }) do
+    HULL_POINTS[#HULL_POINTS + 1] = { x = 2491, y = y, nx = 1, ny = 0 }
+    HULL_POINTS[#HULL_POINTS + 1] = { x = -2178, y = y, nx = -1, ny = 0 }
+end
+-- The quay is uneven: at some points it was seen only high up (0..450), and the stern
+-- went in between the first sampled points (2026-11-19).
+local HULL_HEIGHTS = { -450, -150, 150, 400 }
+local traceColor = { R = 0, G = 0, B = 0, A = 0 }
+
+-- The taut lines: { bx, by (socket), vx, vy (its pull) }.
+local function tautLines(actor)
+    local bl = actor.RootComponent:K2_GetComponentLocation()
+    local out = {}
+    for _, path in ipairs(M.mooringCables) do
+        local c = StaticFindObject(path)
+        if c and c:IsValid() then
+            local a, b = c.SphereA:K2_GetComponentLocation(), c.SphereB:K2_GetComponentLocation()
+            local boatEnd, quayEnd = a, b
+            if (b.X - bl.X) ^ 2 + (b.Y - bl.Y) ^ 2 < (a.X - bl.X) ^ 2 + (a.Y - bl.Y) ^ 2 then boatEnd, quayEnd = b, a end
+            local sx, sy = quayEnd.X - boatEnd.X, quayEnd.Y - boatEnd.Y
+            local span = math.sqrt(sx * sx + sy * sy)
+            if span > PULL_MIN_SPAN then
+                out[#out + 1] = { bx = boatEnd.X, by = boatEnd.Y, vx = sx / span * PULL_SPEED, vy = sy / span * PULL_SPEED }
+            end
+        end
+    end
+    return out
+end
+
+-- Turn (rad/s) the lines give about a point, averaged over the lines.
+local function turnAbout(lines, px, py)
+    local w = 0
+    for _, ln in ipairs(lines) do
+        local rx, ry = ln.bx - px, ln.by - py
+        local r2 = rx * rx + ry * ry
+        if r2 > 100 * 100 then w = w + (rx * ln.vy - ry * ln.vx) / r2 end
+    end
+    local lim = math.rad(MAX_TURN)
+    return math.max(-lim, math.min(lim, w / #lines))
+end
+
+-- Hull points that would reach the quay with this motion (v of the root, w rad/s)
+-- over dt; skipNear: a pivot whose neighbours are not tested.
+local function blockedPoints(actor, cx, cy, yaw, vx, vy, w, dt, skipNear)
+    local ksl = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local kml = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+    local tf = actor:GetTransform()
+    local cs, sn = math.cos(math.rad(yaw)), math.sin(math.rad(yaw))
+    local out = {}
+    for _, p in ipairs(HULL_POINTS) do
+        local wp = kml:TransformLocation(tf, { X = p.x, Y = p.y, Z = 0 })
+        local near = skipNear and (wp.X - skipNear.x) ^ 2 + (wp.Y - skipNear.y) ^ 2 < 300 * 300
+        local pvx, pvy = vx - w * (wp.Y - cy), vy + w * (wp.X - cx)
+        local nx, ny = cs * p.nx - sn * p.ny, sn * p.nx + cs * p.ny
+        local sp = math.sqrt(pvx * pvx + pvy * pvy)
+        -- Moving clearly outward only: a point sliding along the quay is not stopped by it.
+        if not near and sp > 0.01 and pvx * nx + pvy * ny > 0.1 * sp then
+            local len = sp * dt + QUAY_CLEAR
+            for _, hz in ipairs(HULL_HEIGHTS) do
+                local from = kml:TransformLocation(tf, { X = p.x, Y = p.y, Z = hz })
+                local to = { X = from.X + pvx / sp * len, Y = from.Y + pvy / sp * len, Z = from.Z }
+                local ok, hit = pcall(function()
+                    return ksl:LineTraceSingle(actor, from, to, 0, false, {}, 0, {}, true, traceColor, traceColor, 0)
+                end)
+                if ok and hit == true then
+                    out[#out + 1] = { x = wp.X, y = wp.Y, px = p.x, py = p.y, nx = nx, ny = ny }
+                    break
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- One step of the pull: returns dx, dy, dyaw (degrees) and what happened.
+local function pullStep(actor, h, dt)
+    local lines = tautLines(actor)
+    if #lines == 0 then return nil, "för korta" end
+    local cx, cy = h.x, h.y
+    local vx, vy = 0, 0
+    for _, ln in ipairs(lines) do vx, vy = vx + ln.vx, vy + ln.vy end
+    vx, vy = vx / #lines, vy / #lines
+    local w = #lines >= 2 and turnAbout(lines, cx, cy) or 0
+    local hits = blockedPoints(actor, cx, cy, h.yaw, vx, vy, w, dt)
+    if #hits == 0 then return vx * dt, vy * dt, math.deg(w * dt), "drar" end
+    -- Against the quay the hull is only stopped going into it: the pull along the
+    -- quay slides the boat on (a line far aft drew it back along the quay, user
+    -- 2026-11-19), while the lines turn it about the touching point.
+    local p = hits[1]
+    local along = vx * -p.ny + vy * p.nx
+    local tx, ty = -p.ny * along, p.nx * along
+    if math.abs(along) < 2 then tx, ty = 0, 0 end
+    local wp = turnAbout(lines, p.x, p.y)
+    if math.abs(wp) < math.rad(0.05) then wp = 0 end
+    local tries = {
+        { wp, tx, ty, "glider och vrider" },
+        { 0, tx, ty, "glider" },
+        { wp, 0, 0, "vrider" },
+    }
+    for _, t in ipairs(tries) do
+        local tw, sx, sy, what = t[1], t[2], t[3], t[4]
+        if tw ~= 0 or sx ~= 0 or sy ~= 0 then
+            local mvx, mvy = sx - tw * (cy - p.y), sy + tw * (cx - p.x)
+            if #blockedPoints(actor, cx, cy, h.yaw, mvx, mvy, tw, dt, p) == 0 then
+                return mvx * dt, mvy * dt, math.deg(tw * dt), string.format("%s vid %.0f/%.0f", what, p.px, p.py)
+            end
+        end
+    end
+    return nil, string.format("ligger an mot kajen vid %.0f/%.0f", p.px, p.py)
+end
+
+-- After the hold lets go the hull gets physics back; a hull left touching the
+-- quay was thrown out (2026-11-19). Its speed is capped for a few seconds.
+local SOFT_SECONDS, SOFT_SPEED, SOFT_SPIN = 5, 30, 3
+local soft = {}             -- key -> time the cap ends
+
+-- Anchors (user 2026-11-19): up while any mooring line is in and never set again
+-- meanwhile, kept up 30 s after the last line is let go, and up once the boat is
+-- under way. Done in the game that moves the boat; the other mirrors its anchors.
+local ANCHOR_FREE_AFTER, ANCHOR_THROTTLE, ANCHOR_RETRY = 30, 0.05, 2
+local anchorsFreeAt, anchorLiftAt = {}, {}
+
+-- Each anchor module has its own state (VoyageAnchor.AnchorDropped): one dropped
+-- at the module left the boat's AnchorsDropped false, and the rule never saw it.
+local function keepAnchorsUp(key, actor, why)
+    if now() - (anchorLiftAt[key] or -100) < ANCHOR_RETRY then return end
+    local lifted = 0
+    local ok, down = pcall(function() return actor.AnchorsDropped end)
+    if ok and down then
+        pcall(function() actor:LiftAnchors() end)
+        lifted = lifted + 1
+    end
+    for _, part in ipairs(anchorParts[key] or findAnchors(key, actor)) do
+        pcall(function()
+            local m = part.module and StaticFindObject(part.module)
+            local comp = m and m:IsValid() and m.VoyageAnchor
+            if comp and comp:IsValid() and comp.AnchorDropped then
+                comp:LiftAnchor()
+                lifted = lifted + 1
+            end
+        end)
+    end
+    if lifted > 0 then
+        anchorLiftAt[key] = now()
+        log("båt %s: ankarna upp (%s, %d)", key, why, lifted)
+    end
+end
+
+local function anchorRules(key, actor)
+    local okS, errS = pcall(stowRaisedAnchors, key, actor)
+    if not okS then log("båt %s: ankarstuvning: %s", key, tostring(errS)) end
+    if #M.mooringCables > 0 then
+        keepAnchorsUp(key, actor, "förtöjd")
+    elseif anchorsFreeAt[key] and now() < anchorsFreeAt[key] then
+        keepAnchorsUp(key, actor, "nyss förtöjd")
+    elseif math.abs(control(actor, "GetThrottleActual")) > ANCHOR_THROTTLE then
+        keepAnchorsUp(key, actor, "körs")
+    end
+end
+
+local function softRelease()
+    for key, untilT in pairs(soft) do
+        local actor = boats[key]
+        local b = actor and actor:IsValid() and now() < untilT and body(actor)
+        if not b then
+            soft[key] = nil
+        else
+            local v = b:GetPhysicsLinearVelocity(FName("None"))
+            local s = math.sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z)
+            if s > SOFT_SPEED then
+                local k = SOFT_SPEED / s
+                b:SetPhysicsLinearVelocity({ X = v.X * k, Y = v.Y * k, Z = v.Z * k }, false, FName("None"))
+            end
+            local a = b:GetPhysicsAngularVelocityInDegrees(FName("None"))
+            local sa = math.sqrt(a.X * a.X + a.Y * a.Y + a.Z * a.Z)
+            if sa > SOFT_SPIN then
+                local k = SOFT_SPIN / sa
+                b:SetPhysicsAngularVelocityInDegrees({ X = a.X * k, Y = a.Y * k, Z = a.Z * k }, false, FName("None"))
+            end
+        end
+    end
+end
 
 local function updateHold(key, actor, driving)
     local root = actor.RootComponent
     local l = root:K2_GetComponentLocation()
-    if driving or not M.moored then
+    if not M.native then
+        local okA, errA = pcall(anchorRules, key, actor)
+        if not okA then log("båt %s: ankarreglerna: %s", key, tostring(errA)) end
+    end
+    -- A line moved to another bollard leaves the boat without lines for a moment; let
+    -- go and taken again, the hull got physics back each time and was knocked (2026-11-19).
+    local h0 = hold[key]
+    if h0 and not driving and not M.native and not M.moored then
+        h0.zeroSince = h0.zeroSince or now()
+        if now() - h0.zeroSince < RELEASE_GRACE then return end
+    elseif h0 then
+        h0.zeroSince = nil
+    end
+    if driving or not M.moored or M.native then
         if hold[key] then
             hold[key] = nil
             setHullPhysics(key, actor, true)
             stillBody(actor)
-            log("båt %s: förtöjning släppt, vågorna tar båten igen", key)
+            soft[key] = now() + SOFT_SECONDS
+            anchorsFreeAt[key] = now() + ANCHOR_FREE_AFTER
+            log("båt %s: förtöjning släppt, vågorna tar båten igen (farten begränsas %d s)", key, SOFT_SECONDS)
         end
         local r = root:K2_GetComponentRotation()
-        local pitch, roll = r.Pitch or 0, r.Roll or 0
+        local pitch, roll = RotP(r) or 0, r.Roll or 0
         local s = rest[key]
         if not s then
             rest[key] = { z = l.Z, pitch = pitch, roll = roll, t = now() }
@@ -654,52 +967,63 @@ local function updateHold(key, actor, driving)
         local r = root:K2_GetComponentRotation()
         -- Held upright: the average tilt taken while the boat bobbed (during
         -- loading) left it standing askew (2026-11-18).
-        h = { z = s and s.z or l.Z, pitch = 0, roll = 0, stillSince = now(), lines = M.mooringLines }
+        h = { z = s and s.z or l.Z, pitch = 0, roll = 0, x = l.X, y = l.Y, yaw = r.Yaw, lines = 0 }
         hold[key] = h
         setOwnMovement(key, actor, true)
+        -- Off while moored, as on 18/11: with it on, the reeling lines built up force
+        -- against the hull put back every frame, it knocked on the quay and lost health,
+        -- and let go it was thrown off (2026-11-19). Back on at release or change of owner.
+        stillBody(actor)
+        setHullPhysics(key, actor, false, true)
         log("båt %s: förtöjd, höjd %.0f och lutning %.1f/%.1f hålls (nu %.0f, %.1f/%.1f)", key, h.z, h.pitch, h.roll,
-            l.Z, r.Pitch or 0, r.Roll or 0)
+            l.Z, RotP(r) or 0, r.Roll or 0)
     end
-    -- A line moved to another point along the quay (or reeled in) pulls the
-    -- boat there, as in singleplayer: the boat is let go sideways until it
-    -- has lain still again (user 2026-11-18).
-    if h.lines ~= M.mooringLines then
-        h.lines = M.mooringLines
-        if h.x then
-            h.x, h.y, h.yaw, h.lx = nil, nil, nil, nil
-            h.stillSince = now()
-            setHullPhysics(key, actor, true)
-            log("båt %s: förtöjningslinorna ändrades, linorna får dra båten", key)
-        end
+    local count = #M.mooringCables
+    if count ~= h.lines then
+        if count >= 2 and h.lines < 2 then h.twoSince = now() end
+        if count < 2 then h.twoSince = nil end
+        h.lines = count
+        log("båt %s: %d förtöjningslinor, %s", key, count,
+            count >= 2 and string.format("drar in %d s och låser sedan", TWO_LINE_SECONDS) or "drar in långsamt")
     end
-    if h.x then return end
-    if h.lx then
-        local dt = now() - h.lt
-        if dt > 0 and math.sqrt((l.X - h.lx) ^ 2 + (l.Y - h.ly) ^ 2) / dt > SETTLE_SPEED then h.stillSince = now() end
+    local pulling = count == 1 or (h.twoSince ~= nil and now() - h.twoSince < TWO_LINE_SECONDS)
+    if not pulling then
+        if not pulling and h.ux then log("båt %s: låst vid kajen (%.0f %.0f)", key, h.x, h.y) end
+        h.ux, h.pt = nil, nil
+        return
     end
-    h.lx, h.ly, h.lt = l.X, l.Y, now()
-    if now() - h.stillSince >= SETTLE_SECONDS then
-        h.x, h.y, h.yaw = l.X, l.Y, root:K2_GetComponentRotation().Yaw
-        setHullPhysics(key, actor, false)
-        log("båt %s: ligger still vid kajen, hela läget hålls", key)
+    -- Ten steps a second: each step traces up to 80 lines along the hull.
+    if h.pt and now() - h.pt < 0.1 then return end
+    local dt = math.min(now() - (h.pt or now()), 0.3)
+    h.pt = now()
+    local okP, dx, dy, dyaw, what = pcall(pullStep, actor, h, dt)
+    if not okP then
+        if not h.pullErr then h.pullErr = true log("båt %s: dragningen: %s", key, tostring(dx)) end
+        return
     end
+    if not dx then what = dy end
+    local state = what:gsub(" vid .*", "")
+    if state ~= h.state then
+        h.state = state
+        log("båt %s: linorna: %s", key, what)
+    end
+    h.ux = dx ~= nil or nil
+    if dx then h.x, h.y, h.yaw = h.x + dx, h.y + dy, h.yaw + dyaw end
 end
 
 local function holdAll()
     for key, h in pairs(hold) do
         local actor = boats[key]
         if actor and actor:IsValid() and not M.peerControls(key) then
-            local loc, rot
-            if h.x then
-                loc, rot = { X = h.x, Y = h.y, Z = h.z }, { Pitch = h.pitch, Yaw = h.yaw, Roll = h.roll }
-            else
-                local root = actor.RootComponent
-                local l, r = root:K2_GetComponentLocation(), root:K2_GetComponentRotation()
-                loc, rot = { X = l.X, Y = l.Y, Z = h.z }, { Pitch = h.pitch, Yaw = r.Yaw, Roll = h.roll }
-            end
-            M.moveActor(actor, loc, rot)
+            M.moveActor(actor, { X = h.x, Y = h.y, Z = h.z }, Rot(h.pitch, h.yaw, h.roll))
             stillBody(actor)
         else
+            -- The other game took the moored boat: this one follows, and a follower keeps
+            -- its hull's physics (turned on at a later take-over, the boat threw itself about).
+            if actor and actor:IsValid() then
+                pcall(setHullPhysics, key, actor, true)
+                pcall(stillBody, actor)
+            end
             hold[key] = nil
         end
     end
@@ -717,19 +1041,19 @@ local tiltLog = { at = 0, n = 0, worst = 0 }
 
 local function limitTilt()
     for key, actor in pairs(boats) do
-        if not hold[key] and key:sub(1, 2) == "id" and actor:IsValid() and not M.peerControls(key) then
+        if not M.native and not hold[key] and key:sub(1, 2) == "id" and actor:IsValid() and not M.peerControls(key) then
             local root = actor.RootComponent
             local r = root:K2_GetComponentRotation()
-            local pitch, roll = r.Pitch or 0, r.Roll or 0
+            local pitch, roll = RotP(r) or 0, r.Roll or 0
             if math.abs(pitch) > MAX_TILT or math.abs(roll) > MAX_TILT then
                 setOwnMovement(key, actor, true)
                 local worst = math.max(math.abs(pitch), math.abs(roll))
                 tiltLog.n = tiltLog.n + 1
                 if worst > tiltLog.worst then tiltLog.worst = worst end
-                pitch = math.max(-MAX_TILT, math.min(MAX_TILT, pitch))
-                roll = math.max(-MAX_TILT, math.min(MAX_TILT, roll))
-                M.moveActor(actor, root:K2_GetComponentLocation(), { Pitch = pitch, Yaw = r.Yaw or 0, Roll = roll })
-                stillBody(actor, true)
+                -- Upright, not held at the limit: kept at 25 degrees the boat stayed tipped
+                -- (2026-11-19). Until that day pitch read as 0 here, which levelled it by accident.
+                M.moveActor(actor, root:K2_GetComponentLocation(), Rot(0, r.Yaw or 0, 0))
+                stillBody(actor)
             end
         end
     end
@@ -870,6 +1194,77 @@ end
 local frameCallbacks = {}
 function M.addFrame(fn) frameCallbacks[#frameCallbacks + 1] = fn end
 
+-- Trap (2026-11-19): the boat this game moves jolted while the guest drove, never
+-- while the host did. When its tilt jumps by more than TRAP_DEG in a frame, every
+-- actor with collision near the hull is logged, to see what pushed it.
+M.trap = true
+local TRAP_DEG, TRAP_GAP, TRAP_MAX = 8, 2, 15
+local trapLast, trapAt = {}, -100
+local KSL = "/Script/Engine.Default__KismetSystemLibrary"
+
+local function trapLog(key, actor, jump)
+    trapAt = now()
+    local root = actor.RootComponent
+    local c = root:K2_GetComponentLocation()
+    local found = {}
+    local ok, err = pcall(function()
+        StaticFindObject(KSL):SphereOverlapActors(actor, c, 2500, { 0, 1, 2, 3, 4, 5, 6 }, StaticFindObject("/Script/Engine.Actor"), { actor }, found)
+    end)
+    if not ok then log("fälla: sökningen gick inte: %s", tostring(err)) return end
+    local kml = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+    local rows = {}
+    for _, e in ipairs(found) do
+        pcall(function()
+            local a = e.get and e:get() or e
+            if not (a and a:IsValid()) then return end
+            local cls = a:GetClass():GetFName():ToString()
+            if cls:find("^BP_Module") or cls:find("^BP_Attachment") then return end
+            local att = a:GetAttachParentActor()
+            if att and att:IsValid() and att:GetAddress() == actor:GetAddress() then
+                local rp = a.RootComponent
+                if not (rp and rp:IsValid() and rp:IsSimulatingPhysics(FName("None"))) and not a:GetClass():GetFName():ToString():find("SkeletalMeshActor", 1, true) then return end
+            end
+            local l = a:K2_GetActorLocation()
+            local rel = kml:InverseTransformLocation(actor:GetTransform(), l)
+            local sim = false
+            pcall(function() sim = a.RootComponent:IsSimulatingPhysics(FName("None")) end)
+            rows[#rows + 1] = { d = math.sqrt(rel.X ^ 2 + rel.Y ^ 2 + rel.Z ^ 2),
+                s = string.format("%s %.0f/%.0f/%.0f%s", a:GetClass():GetFName():ToString(), rel.X, rel.Y, rel.Z, sim and " fysik" or "") }
+        end)
+    end
+    table.sort(rows, function(x, y) return x.d < y.d end)
+    local list = {}
+    for i = 1, math.min(TRAP_MAX, #rows) do list[#list + 1] = rows[i].s end
+    log("fälla: båt %s hoppade %.1f° på en bildruta (%s styr); %d aktörer nära: %s", key, jump,
+        M.peerControls(key) and "den andra" or "jag", #rows, table.concat(list, "; "))
+end
+
+local function trap()
+    for key, actor in pairs(boats) do
+        if key:sub(1, 2) == "id" and actor:IsValid() and not M.peerControls(key) then
+            local r = actor.RootComponent:K2_GetComponentRotation()
+            local p, ro = r.pitch or r.Pitch or 0, r.Roll or 0
+            local last = trapLast[key]
+            if last then
+                local jump = math.max(math.abs(wrap(p - last.p)), math.abs(wrap(ro - last.r)))
+                if jump > TRAP_DEG and now() - trapAt > TRAP_GAP then trapLog(key, actor, jump) end
+            end
+        else
+            trapLast[key] = nil
+        end
+    end
+end
+
+-- After the tilt limit, so its own levelling is not taken for a jolt.
+local function trapStore()
+    for key, actor in pairs(boats) do
+        if key:sub(1, 2) == "id" and actor:IsValid() then
+            local r = actor.RootComponent:K2_GetComponentRotation()
+            trapLast[key] = { p = r.pitch or r.Pitch or 0, r = r.Roll or 0 }
+        end
+    end
+end
+
 local function onFrame(fromHook)
     if fromHook then frameHookAt = now() elseif now() - frameHookAt < 0.5 then return end
     local t = now()
@@ -888,8 +1283,17 @@ local function onFrame(fromHook)
         local okH, errH = pcall(holdAll)
         if not okH then log("båt-förtöjningsfel: %s", tostring(errH)) hold = {} end
     end
+    if M.trap then
+        local okP, errP = pcall(trap)
+        if not okP then log("fälla-fel: %s", tostring(errP)) end
+    end
+    if next(soft) then
+        local okS, errS = pcall(softRelease)
+        if not okS then log("båt-frisläppningsfel: %s", tostring(errS)) soft = {} end
+    end
     local okT, errT = pcall(limitTilt)
     if not okT then log("båt-lutningsfel: %s", tostring(errT)) end
+    if M.trap then pcall(trapStore) end
     local parts = partCost
     parts[1] = (parts[1] or 0) + (c1 - c0)
     parts[2] = (parts[2] or 0) + (os.clock() - c1)
@@ -1028,7 +1432,7 @@ function M.tick()
             if key == myKey then
                 if peerAuthority[key] ~= false then
                     setHullPhysics(key, actor, true)
-                    stillBody(actor)
+                    inheritMotion(key, actor)
                     log("båt %s: jag kör, jag styr (gas %.3f roder %.3f)", key,
                         control(actor, "GetThrottleActual"), control(actor, "GetSteeringActual"))
                     local r = remote[key]
@@ -1043,8 +1447,8 @@ function M.tick()
                         pcall(function()
                             local a = StaticFindObject(path)
                             if a and a:IsValid() then
-                                log("båt %s: 1,5 s efter övertagandet gas %.3f roder %.3f", key,
-                                    control(a, "GetThrottleActual"), control(a, "GetSteeringActual"))
+                                log("båt %s: 1,5 s efter övertagandet gas %.3f roder %.3f, fart %.0f cm/s", key,
+                                    control(a, "GetThrottleActual"), control(a, "GetSteeringActual"), hullSpeed(a))
                             end
                         end)
                     end)
@@ -1084,7 +1488,7 @@ function M.claim(why)
             else
                 peerAuthority[key] = false
                 setHullPhysics(key, actor, true)
-                stillBody(actor)
+                inheritMotion(key, actor)
                 net.send("bclaim", key)
                 sendState(key, actor, false)
                 log("båt %s: %s, jag styr nu", key, why)
@@ -1128,9 +1532,11 @@ function M.handle(msg)
     while #buf > 30 do table.remove(buf, 1) end
     remote[key] = {
         seq = seq or 0, t = now(), buf = buf, throttle = tonumber(msg[17]), steer = tonumber(msg[18]),
+        v = (n[10] and n[11] and n[12]) and { X = n[10], Y = n[11], Z = n[12], W = n[13] or 0 } or nil,
         anchors = msg[14] == "1", driving = msg[15] == "1",
         -- Kept across messages: reset with each one, the follower lifted the
         -- anchors 20 times a second (2026-11-18).
+        held = msg[19] == "1",
         anchorsSeen = prev and prev.anchorsSeen, anchorsAt = prev and prev.anchorsAt, anchorsLogged = prev and prev.anchorsLogged,
     }
     return true

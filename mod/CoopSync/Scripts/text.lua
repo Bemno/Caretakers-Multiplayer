@@ -37,9 +37,11 @@ local S = {
         join_in_world = "Quit to the main menu first to join",
         update_to = "Update multiplayer to %s", update_downloading = "Downloading update %d %%",
         update_restart = "Restart and install %s", update_failed = "Update to %s failed, try again",
+        slots_host = "Multiplayer: save the world from the Esc menu", slots_guest = "Multiplayer: the host saves the world",
     },
     sv = {
         save_world = "Spara %s", saved = "Sparade %s",
+        slots_host = "Multiplayer: spara världen från Esc-menyn", slots_guest = "Multiplayer: värden sparar världen",
         create_world = "Skapa värld", save_name = "Spara namn", rename = "Byt namn", name_hint = "Världens namn", bad_name = "Ogiltigt namn", name_taken = "%s finns redan", renamed = "Bytte namn till %s",
         join = "Anslut", join_invite = "Anslut med inbjudan", join_name = "Anslut till %s", offline = "%s (offline)", no_recent = "Inga tidigare servrar", archive = "Arkiv", delete = "Ta bort %s", confirm_delete = "Ja, ta bort %s", cancel = "Avbryt", deleted = "Tog bort %s",
         multiplayer = "Multiplayer", host = "Värd", join_clip = "Anslut (inbjudan i urklipp)", back = "Tillbaka",

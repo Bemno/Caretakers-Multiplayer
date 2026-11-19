@@ -62,7 +62,7 @@ local function scalar(v)
         local okO, key = pcall(function() if v.IsValid and v:IsValid() and v.GetFullName then return keyOf(v) end end)
         if okO and key then return "u" .. key end
         local okV, vec = pcall(function()
-            if v.Pitch ~= nil then return string.format("r%.3f,%.3f,%.3f", v.Pitch, v.Yaw, v.Roll) end
+            if RotP(v) ~= nil then return string.format("r%.3f,%.3f,%.3f", RotP(v), v.Yaw, v.Roll) end
             if v.X ~= nil and v.Y ~= nil and v.Z ~= nil then return string.format("v%.3f,%.3f,%.3f", v.X, v.Y, v.Z) end
         end)
         if okV and vec then return vec end

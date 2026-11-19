@@ -50,6 +50,17 @@ local function boxesNow()
     return set
 end
 
+-- The box's name is what the game shows when the player looks at it. Defined
+-- above makeBox: below it, makeBox called a nil and the name was never set
+-- on a new box (pcall log 2026-11-19).
+local wantedName
+local function applyName()
+    local a, inv = box()
+    if not (a and inv and inv:IsValid() and wantedName) then return end
+    pcall(function() a.MaxNameLength = 200 end)
+    inv:SetInventoryName(FText(wantedName))
+end
+
 local function makeBox(puppet)
     if now() - lastSummon < SUMMON_AGAIN then return end
     lastSummon = now()
@@ -65,7 +76,7 @@ local function makeBox(puppet)
     if pc and pc:IsValid() then pcall(function() pc:K2_DestroyComponent(made) end) end
     pcall(function() made.RootComponent:SetSimulatePhysics(false) end)
     pcall(function() made:K2_AttachToActor(puppet, FName("None"), 1, 1, 1, false) end)
-    pcall(function() made.RootComponent:K2_SetRelativeLocationAndRotation(OFFSET, { Pitch = 0, Yaw = 0, Roll = 0 }, false, {}, true) end)
+    pcall(function() made.RootComponent:K2_SetRelativeLocationAndRotation(OFFSET, Rot(0, 0, 0), false, {}, true) end)
     pcall(function() made:SetActorHiddenInGame(true) end)
     -- Query only, like peerpower's battery: with full collision the hidden box,
     -- teleported with the puppet into the deck and the recycler, shoved the
@@ -133,15 +144,6 @@ local function pollBox()
         net.send("pinvd", boxes.encode(d))
         log("kompisens ryggsäck: jag ändrade %s", boxes.encode(d))
     end
-end
-
--- The box's name is what the game shows when the player looks at it.
-local wantedName
-local function applyName()
-    local a, inv = box()
-    if not (a and inv and inv:IsValid() and wantedName) then return end
-    pcall(function() a.MaxNameLength = 200 end)
-    inv:SetInventoryName(FText(wantedName))
 end
 
 function M.setName(text)

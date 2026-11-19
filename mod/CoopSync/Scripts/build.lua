@@ -66,7 +66,7 @@ local function describe(fab)
     local v, r = fab:K2_GetActorLocation(), fab:K2_GetActorRotation()
     return {
         key = props.wire(idOf(fab) or ""), item = (item and item:IsValid()) and pathOf(item) or nil,
-        loc = { X = v.X, Y = v.Y, Z = v.Z }, rot = { Pitch = r.Pitch or 0, Yaw = r.Yaw or 0, Roll = r.Roll or 0 },
+        loc = { X = v.X, Y = v.Y, Z = v.Z }, rot = Rot(RotP(r) or 0, r.Yaw or 0, r.Roll or 0),
         near = actorsNear(v), mount = { mountOf(fab) },
     }
 end
@@ -130,7 +130,7 @@ mountOf = function(actor)
         local root = actor.RootComponent
         local l, r = root.RelativeLocation, root.RelativeRotation
         return { key, string.format("%.1f", l.X), string.format("%.1f", l.Y), string.format("%.1f", l.Z),
-            string.format("%.2f", r.Pitch), string.format("%.2f", r.Yaw), string.format("%.2f", r.Roll) }
+            string.format("%.2f", RotP(r)), string.format("%.2f", r.Yaw), string.format("%.2f", r.Roll) }
     end)
     if ok and fields then return table.unpack(fields) end
     return "-", "0", "0", "0", "0", "0", "0"
@@ -156,11 +156,14 @@ local function place(actor, loc, rot, m, i)
         -- A runtime-spawned player box did not attach (static root), and its
         -- deck offset became a world position far off the map (2026-11-16).
         pcall(function() actor.RootComponent:SetMobility(2) end)
+        -- A simulating root is not attached: the large player box stayed loose,
+        -- was put at the world spot and bounced off out of sight (2026-11-19).
+        pcall(function() actor.RootComponent:SetSimulatePhysics(false) end)
         actor:K2_AttachToActor(parent, FName("None"), 0, 0, 0, false)
         local pa = actor:GetAttachParentActor()
         if pa and pa:IsValid() and pa:GetAddress() == parent:GetAddress() then
             actor.RootComponent:K2_SetRelativeLocationAndRotation({ X = n(1), Y = n(2), Z = n(3) },
-                { Pitch = n(4), Yaw = n(5), Roll = n(6) }, false, {}, true)
+                Rot(n(4), n(5), n(6)), false, {}, true)
             return
         end
         log("bygge: %s gick inte att fästa vid %s, lägger på världsposition", pathOf(actor), key)
@@ -450,7 +453,7 @@ local function sendBuilt(f, a, id)
     local v, r = a:K2_GetActorLocation(), a:K2_GetActorRotation()
     if f.item then M.learn(f.item, cls) end
     net.send("built", f.key, cls, string.format("%.1f", v.X), string.format("%.1f", v.Y), string.format("%.1f", v.Z),
-        string.format("%.2f", r.Pitch or 0), string.format("%.2f", r.Yaw or 0), string.format("%.2f", r.Roll or 0),
+        string.format("%.2f", RotP(r) or 0), string.format("%.2f", r.Yaw or 0), string.format("%.2f", r.Roll or 0),
         props.wire(id), f.item or "", mountOf(a))
     log("bygge: min blueprint %s byggd till %s (id %s)", f.key, cls, id)
 end
@@ -751,7 +754,7 @@ function M.handle(msg)
     local kind = msg[1]
     if kind == "bp" then
         local ok, err = pcall(showGhost, msg[3], msg[4], { X = num(msg[5]), Y = num(msg[6]), Z = num(msg[7]) },
-            { Pitch = 0, Yaw = num(msg[8]), Roll = 0 }, msg)
+            Rot(0, num(msg[8]), 0), msg)
         if not ok then log("bygge-fel (spöke): %s", tostring(err)) end
         return true
     elseif kind == "bplook" then
@@ -772,7 +775,7 @@ function M.handle(msg)
         return true
     elseif kind == "built" then
         local ok, err = pcall(buildRemote, msg[3], msg[4], { X = num(msg[5]), Y = num(msg[6]), Z = num(msg[7]) },
-            { Pitch = num(msg[8]), Yaw = num(msg[9]), Roll = num(msg[10]) }, msg[11], msg[12], msg)
+            Rot(num(msg[8]), num(msg[9]), num(msg[10])), msg[11], msg[12], msg)
         if not ok then log("bygge-fel (modul): %s", tostring(err)) end
         return true
     end

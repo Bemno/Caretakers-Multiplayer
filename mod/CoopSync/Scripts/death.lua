@@ -52,7 +52,7 @@ local function capture(p)
         meshLoc = vec(mesh.RelativeLocation),
     }
     local r = mesh.RelativeRotation
-    s.meshRot = { Pitch = r.Pitch, Yaw = r.Yaw, Roll = r.Roll }
+    s.meshRot = Rot(RotP(r), r.Yaw, r.Roll)
     for ch = 0, 31 do s.capResp[ch] = cap:GetCollisionResponseToChannel(ch) end
     pcall(function()
         local cyl = p.CollisionCylinderPhysical
@@ -172,7 +172,7 @@ local function revive(p)
     local pc = localPC()
     step("kamera", function()
         local r = pc:GetControlRotation()
-        pc:SetControlRotation({ Pitch = 0, Yaw = r.Yaw, Roll = 0 })
+        pc:SetControlRotation(Rot(0, r.Yaw, 0))
     end)
     step("mus", function() pc.bShowMouseCursor = false end)
     step("styrning", function() StaticFindObject(WBL):SetInputMode_GameOnly(pc, false) end)
@@ -217,7 +217,7 @@ local function respawn(where)
     if hud then step("hud", function() hud:RequestOverlayRemoval() end) end
     revive(p)
     if dest then
-        step("flytt", function() p:K2_TeleportTo(dest, { Pitch = 0, Yaw = p:K2_GetActorRotation().Yaw, Roll = 0 }) end)
+        step("flytt", function() p:K2_TeleportTo(dest, Rot(0, p:K2_GetActorRotation().Yaw, 0)) end)
     end
     dead, buttons, hoverWas, hudAddr = false, {}, nil, nil
     log("död: återuppstod (%s) vid %s", where,

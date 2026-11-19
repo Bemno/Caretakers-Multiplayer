@@ -104,7 +104,7 @@ local function applyShown()
         a:K2_AttachToActor(puppet, FName("None"), 0, 0, 0, false)
         -- The puppet's character looks along the actor's right vector.
         a.RootComponent:K2_SetRelativeLocationAndRotation({ X = 0, Y = HEAD_AHEAD, Z = HEAD_UP },
-            { Pitch = PITCH, Yaw = 90, Roll = 0 }, false, {}, true)
+            Rot(PITCH, 90, 0), false, {}, true)
         log("lampa: kompisens lampa fäst vid dockan")
     end
     local p = shown.params

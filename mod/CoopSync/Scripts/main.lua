@@ -1,3 +1,10 @@
+-- UE4SS 4 names a rotator's pitch "pitch" both out and in, and ignores "Pitch" (3.0.1 used
+-- "Pitch"), so since the move to UE4SS 4 every synced pitch was 0. Read and build rotators with these.
+-- PITCH_FIX = false behaves as before the fix (control run on the bench, 2026-11-19).
+PITCH_FIX = false
+function RotP(r) if not PITCH_FIX then return r and r.Pitch end return r and (r.pitch or r.Pitch) end
+function Rot(p, y, r) if not PITCH_FIX then return { Pitch = p, Yaw = y, Roll = r } end return { pitch = p, Pitch = p, Yaw = y, Roll = r } end
+
 local UEHelpers = require("UEHelpers")
 local net = require("net")
 local spy = require("spy")
@@ -62,6 +69,25 @@ local function log(fmt, ...)
         f:close()
     end
 end
+
+-- Since UE4SS 4 calls inside pcall failed silently for days (the hull never
+-- found, pitch always 0; 2026-11-15..18). The first error of each pcall site
+-- is logged; the global is replaced, so every module's pcall goes through here.
+local rawPcall = pcall
+local pcallSeen, pcallLogged = {}, 0
+local function pcallDone(ok, ...)
+    if not ok and pcallLogged < 300 then
+        local info = debug and debug.getinfo(2, "Sl")
+        local site = info and ((info.short_src or "?"):match("[^/\\]+$") .. ":" .. tostring(info.currentline)) or "?"
+        if not pcallSeen[site] then
+            pcallSeen[site] = true
+            pcallLogged = pcallLogged + 1
+            rawPcall(log, "pcall-fel %s: %s", site, (tostring((...)):match("[^\n]*")))
+        end
+    end
+    return ok, ...
+end
+function pcall(f, ...) return pcallDone(rawPcall(f, ...)) end
 
 
 -- UEHelpers.GetPlayerController can return another player's controller, so
@@ -395,7 +421,7 @@ local function placePuppet()
     if q and math.abs(q.x - s.x) < 0.3 and math.abs(q.y - s.y) < 0.3 and math.abs(q.z - s.z) < 0.3
         and math.abs(wrapYaw(q.yaw - s.yaw)) < 0.3 then return end
     puppetPlaced = s
-    local rot = { Pitch = 0, Yaw = s.yaw + PUPPET_YAW_OFFSET, Roll = 0 }
+    local rot = Rot(0, s.yaw + PUPPET_YAW_OFFSET, 0)
     local loc = { X = s.x, Y = s.y, Z = s.z + PUPPET_Z_OFFSET }
     if s.boat then
         -- Placed in the world from the boat's pose (the attachment stays): the
@@ -536,12 +562,52 @@ local function refreshDeck()
     deckDriving = boat.isBoat(pawn)
 end
 
+-- Coop.deckMeasure (test bench): how much each way of finding the player's place on the
+-- deck jumps between sends, and how far apart the two are, logged every 5 s.
+local deckM = { at = 0, n = 0, jumpOld = 0, jumpBased = 0, apart = 0, noBase = 0 }
+local function measureDeck(old, based)
+    local m = deckM
+    local function d(a, b) return math.sqrt((a.X - b.X) ^ 2 + (a.Y - b.Y) ^ 2 + (a.Z - b.Z) ^ 2) end
+    m.n = m.n + 1
+    if m.lastOld then m.jumpOld = math.max(m.jumpOld, d(old, m.lastOld)) end
+    m.lastOld = old
+    if based then
+        if m.lastBased then m.jumpBased = math.max(m.jumpBased, d(based, m.lastBased)) end
+        m.lastBased = based
+        m.apart = math.max(m.apart, d(old, based))
+    else
+        m.noBase, m.lastBased = m.noBase + 1, nil
+    end
+    if realTime() - m.at >= 5 then
+        log("däck-mätning: %d prov, största hopp gammal %.1f cm, via bas %.1f cm, isär högst %.1f cm, utan bas %d",
+            m.n, m.jumpOld, m.jumpBased, m.apart, m.noBase)
+        deckM = { at = realTime(), n = 0, jumpOld = 0, jumpBased = 0, apart = 0, noBase = 0, lastOld = m.lastOld, lastBased = m.lastBased }
+    end
+end
+
 local function onDeckNow(pawn, l, r)
     if not deckKey then return nil end
     if deckDriving then return onDeck end
     local b = boat.find(deckKey)
     if not b then return nil end
-    local rel = UEHelpers.GetKismetMathLibrary():InverseTransformLocation(b:GetTransform(), l)
+    local kml = UEHelpers.GetKismetMathLibrary()
+    local rel = kml:InverseTransformLocation(b:GetTransform(), l)
+    -- The character's location can be a frame behind the boat's (whichever moved last
+    -- this frame), so at speed the puppet slid back and forth (user 2026-11-18). The
+    -- location relative to the deck it stands on is saved together with the character.
+    local okB, based = pcall(function()
+        local bm = pawn.BasedMovement
+        local base = bm.MovementBase
+        if not (base and base:IsValid() and base:GetOwner():GetAddress() == b:GetAddress()) then return nil end
+        -- Location is in the deck's frame without its scale, and a NetQuantize vector
+        -- UE4SS will not pass on as a Vector.
+        local frame = kml:MakeTransform(base:K2_GetComponentLocation(), base:K2_GetComponentRotation(), { X = 1, Y = 1, Z = 1 })
+        local q = bm.Location
+        return kml:InverseTransformLocation(b:GetTransform(), kml:TransformLocation(frame, { X = q.X, Y = q.Y, Z = q.Z }))
+    end)
+    if okB and based and math.abs(based.X - rel.X) + math.abs(based.Y - rel.Y) + math.abs(based.Z - rel.Z) > 100 then based = nil end
+    if Coop and Coop.deckMeasure then measureDeck(rel, okB and based or nil) end
+    if okB and based then rel = based end
     return { key = deckKey, x = rel.X, y = rel.Y, z = rel.Z, yaw = r.Yaw - b:K2_GetActorRotation().Yaw }
 end
 
@@ -896,9 +962,14 @@ lamp.init(net, log, localPC, realTime, console, function() return puppet end)
 anim.init(net, log)
 paint.init(net, log, realTime, function() return role == "host" end)
 gear.init(net, log, localPC, realTime, function() return puppet end)
+-- The character even while driving: from the boat pawn the paint and gear came out
+-- empty and the list was sent anew at every turn at the helm (pcall log 2026-11-19).
 gear.body = function()
     local p = localPC().Pawn
-    return p and p:IsValid() and ownBody(p) or p
+    if not (p and p:IsValid()) then return p end
+    ownBody(p)
+    local c = ownCharPath and StaticFindObject(ownCharPath)
+    return (c and c:IsValid()) and c or p
 end
 zap.init(net, log, localPC, realTime)
 power.setPuppetSocket(peerpower.socketPath)

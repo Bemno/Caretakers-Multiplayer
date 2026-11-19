@@ -42,7 +42,9 @@ local function lookingAtHead(puppet)
     local dx, dy, dz = h.X - c.X, h.Y - c.Y, h.Z - c.Z
     local d = math.sqrt(dx * dx + dy * dy + dz * dz)
     if d > LOOK_DIST or d < 1 then return false end
-    local p, y = math.rad(r.Pitch), math.rad(r.Yaw)
+    -- The camera's real pitch, whatever PITCH_FIX says: RotP gave nil under UE4SS 4 and
+    -- looking at the other player's head never counted (pcall log 2026-11-19).
+    local p, y = math.rad(r.pitch or r.Pitch or 0), math.rad(r.Yaw)
     local fx, fy, fz = math.cos(p) * math.cos(y), math.cos(p) * math.sin(y), math.sin(p)
     return (fx * dx + fy * dy + fz * dz) / d > LOOK_COS
 end

@@ -1,7 +1,7 @@
 -- Multiplayer sessions: which world the host plays, handing it to the guest,
--- and keeping singleplayer saves untouched. Worlds live in SaveGames\Coop;
--- coopnet lists, imports and transfers the files and guards the
--- singleplayer autosave (see coopnet/saves.py).
+-- and keeping singleplayer saves untouched. Worlds are in SaveGames\Coop only
+-- during a session; coopnet lists, imports, moves and transfers the files and
+-- guards the singleplayer saves (see coopnet/saves.py).
 local M = {}
 local T = require("text")
 
@@ -61,6 +61,7 @@ function M.statusText()
     return ""
 end
 M.progress = nil
+M.guestSaves = true
 
 local function coopDir()
     return (os.getenv("LOCALAPPDATA") or "") .. "\\Voyage\\Saved\\SaveGames\\Coop\\"
@@ -110,10 +111,20 @@ local function loadSlot(slot)
     return ok
 end
 
+-- coopnet moves the worlds into SaveGames\Coop when the guard goes on (they live
+-- outside SaveGames between sessions, out of singleplayer's reach); a world is
+-- loaded once that is done, or after GUARD_WAIT if coopnet does not answer.
+local GUARD_WAIT = 10
+local guardReady, guardAskedAt = false, nil
+local function askGuard()
+    guardReady, guardAskedAt = false, os.time()
+    net.send("save", "guard", "on")
+end
+
 local function becomeRole(r, w)
     role, world = r, w
     setRole(r)
-    net.send("save", "guard", "on")
+    askGuard()
 end
 
 function M.init(netModule, logFn, levelNameFn, setRoleFn, ioName)
@@ -239,7 +250,7 @@ function M.host(name, mode)
     becomeRole("host", name)
     startHosting(name, mode)
     status("loading", name)
-    loadSlot("Coop/" .. name)
+    pendingLoad = "Coop/" .. name
 end
 
 -- A world name becomes a file name in SaveGames\Coop and travels in the
@@ -253,9 +264,11 @@ local function cleanName(name)
     return name
 end
 
+-- From coopnet's list: between sessions the files are outside SaveGames.
 local function worldExists(name)
-    local f = io.open(coopDir() .. name .. ".sav", "rb")
-    if f then f:close() return true end
+    for _, w in ipairs(M.worlds) do
+        if w.name:lower() == name:lower() then return true end
+    end
     return false
 end
 
@@ -376,7 +389,10 @@ function M.tick()
     else
         onTitleSince = nil
     end
-    if pendingLoad and level == "Empty" then
+    local guardWait = pendingLoad and pendingLoad ~= "Coop/" .. CLIENT and not guardReady
+        and guardAskedAt and os.time() - guardAskedAt < GUARD_WAIT
+    if pendingLoad and level == "Empty" and not guardWait then
+        if not guardReady and pendingLoad ~= "Coop/" .. CLIENT then log("vakten svarade inte, laddar ändå") end
         local slot = pendingLoad
         pendingLoad = nil
         loadSlot(slot)
@@ -409,6 +425,10 @@ function M.tick()
     end
 
     -- Saving while a large world is still streaming in crashed the game.
+    -- The guest's copy is never used (each join brings the host's world), but saving it
+    -- holds the game's autosave off the singleplayer slots: without it the guest's game
+    -- autosaved into them 5 min after loading (bench 2026-11-19, the guard put them back).
+    if role == "guest" and not M.guestSaves then return end
     if os.time() - lastSave >= SAVE_EVERY and os.time() - inWorldSince > 60 then
         lastSave = os.time()
         local ok, res = pcall(function() return sub:RequestSaveGame(slot) end)
@@ -449,7 +469,7 @@ function M.handle(msg)
         log("världen mottagen: %s", msg[3])
         M.progress = nil
         if role == "guest" then
-            net.send("save", "guard", "on")
+            askGuard()
             status("loading_host")
             pendingLoad = "Coop/" .. CLIENT
             if levelName() ~= "Empty" then
@@ -482,6 +502,9 @@ function M.handle(msg)
             M.refresh()
         elseif what == "error" then status("error", tostring(msg[4])) log("spar-fel: %s", tostring(msg[4]))
         elseif what == "guarded" then log("vakten återställde %s singleplayer-filer", tostring(msg[4]))
+        elseif what == "guard" then
+            guardReady = msg[4] == "on"
+            log("vakten %s, världarna %s", msg[4], guardReady and "inne i SaveGames" or "flyttade ut")
         end
         return true
     elseif kind == "steam" then

@@ -33,6 +33,16 @@ M.isHost = false
 M.sentDrops = {}    -- own ids drops.lua sent, so ocean.lua does not send them again
 M.claimedPaths = {} -- actor paths drops.lua made as copies of the peer's drops
 local missing = {}
+-- Poses, rest and weld for a drop whose copy is not made here yet: the owner's
+-- grinder output landed and rested before the copy existed, which then hung at
+-- the outlet (2026-11-19). Replayed when drops.lua links the copy (M.claimed).
+local early = {}    -- id -> { t, pose, rest, weld }
+local EARLY_SECONDS = 30
+local function noteEarly(id, field, value)
+    local e = early[id]
+    if not e or now() - e.t > EARLY_SECONDS then e = { t = now() } early[id] = e end
+    e[field] = value
+end
 
 -- Persistent components are looked up on demand. NotifyOnNewObject is not used
 -- here: thousands of them are created on the streaming thread, and entering Lua
@@ -75,6 +85,10 @@ local pairedLocal = {}      -- our ids that are copies of a peer object
 local function findById(id)
     local paired = aliased[id]
     if paired and paired:IsValid() then return paired end
+    -- Our copy of some other peer object that happens to carry this id. Checked
+    -- before the index too: there the peer's pose for its own new item moved our
+    -- unrelated copy, and the two games removed each other's items (2026-11-19).
+    if pairedLocal[id] then return nil end
     local hit = byId[id]
     if hit and hit:IsValid() then return hit end
     -- Each component is indexed once it has its id, and only after a fresh
@@ -89,8 +103,6 @@ local function findById(id)
         end
     end
     hit = byId[id]
-    -- Our copy of some other peer object that happens to carry this id.
-    if pairedLocal[id] then return nil end
     if hit and hit:IsValid() then return hit end
     return nil
 end
@@ -113,6 +125,15 @@ function M.suppressGone(localId) removedByPeer[localId] = true end
 local muteUntil = 0
 function M.muteGone(seconds) muteUntil = os.time() + seconds end
 M.findById = function(id) return findById(id) end
+
+-- drops.lua: an own drop just sent. The index is refreshed only every 2 s, and the
+-- other game's poses for it came first: "saknas här", and the grinder's output hung
+-- at the outlet in this game (2026-11-19).
+function M.registerOwn(id, pc)
+    byId[id] = pc
+    local ok, addr, raw = pcall(function() return pc:GetAddress(), pc.PersistentUniqueId end)
+    if ok then indexed[addr] = raw end
+end
 
 function M.alias(peerId, localId, pc)
     toPeer[localId] = peerId
@@ -209,7 +230,7 @@ local function sendWeld(comp, id)
     local l = rel.Translation
     local r = StaticFindObject(KML):Quat_Rotator(rel.Rotation)
     net.send("weld", wire(id), wire(pid), parent:GetFName():ToString(),
-        f1(l.X), f1(l.Y), f1(l.Z), f1(r.Pitch), f1(r.Yaw), f1(r.Roll))
+        f1(l.X), f1(l.Y), f1(l.Z), f1(RotP(r)), f1(r.Yaw), f1(r.Roll))
     log("svetsad id %s på %s/%s, skickad", id, owner:GetFullName(), parent:GetFName():ToString())
 end
 
@@ -230,11 +251,15 @@ local function bounds(actor)
     return c, x
 end
 
--- The boat whose bounds hold the location.
+-- The boat whose bounds hold the location, and not under its deck: the bounds reach
+-- 7 m below the root, and trash floating under the hull counted as on board and was
+-- welded into it (2026-11-19). On the barge, crates on deck rest at -330.
+local DECK_MIN_Z = -420
 local function boatAt(l)
     for _, b in pairs(require("boat").list()) do
         local c, x = bounds(b)
-        if math.abs(l.X - c.X) <= x.X and math.abs(l.Y - c.Y) <= x.Y and l.Z >= c.Z - x.Z and l.Z <= c.Z + x.Z + 200 then
+        if math.abs(l.X - c.X) <= x.X and math.abs(l.Y - c.Y) <= x.Y and l.Z >= c.Z - x.Z and l.Z <= c.Z + x.Z + 200
+            and StaticFindObject(KML):InverseTransformLocation(b:GetTransform(), l).Z >= DECK_MIN_Z then
             return b
         end
     end
@@ -327,11 +352,11 @@ local function sendProp(id, comp)
         local kml = StaticFindObject(KML)
         local rel = kml:MakeRelativeTransform(comp:K2_GetComponentToWorld(), b:GetTransform())
         local t, r = rel.Translation, kml:Quat_Rotator(rel.Rotation)
-        net.send("prop", id, f1(t.X), f1(t.Y), f1(t.Z), f1(r.Pitch), f1(r.Yaw), f1(r.Roll), require("boat").keyOf(b),
+        net.send("prop", id, f1(t.X), f1(t.Y), f1(t.Z), f1(RotP(r)), f1(r.Yaw), f1(r.Roll), require("boat").keyOf(b),
             string.format("%.3f", now()))
     else
         local r = comp:K2_GetComponentRotation()
-        net.send("prop", id, f1(l.X), f1(l.Y), f1(l.Z), f1(r.Pitch), f1(r.Yaw), f1(r.Roll), "", string.format("%.3f", now()))
+        net.send("prop", id, f1(l.X), f1(l.Y), f1(l.Z), f1(RotP(r)), f1(r.Yaw), f1(r.Roll), "", string.format("%.3f", now()))
     end
 end
 M.sendProp = sendProp
@@ -375,7 +400,10 @@ local function setWelded(comp, welded)
 end
 M.setWelded = setWelded
 
-loosen = function(comp) setWelded(comp, false) end
+loosen = function(comp)
+    setWelded(comp, false)
+    pcall(function() comp:SetCollisionEnabled(3) end)
+end
 
 -- Welded with the game's own function. Its second
 -- argument is welded into the first: (crate, hull) welded the boat into the
@@ -393,6 +421,7 @@ local function weldInto(comp, parent)
         local pa = comp:GetAttachParent()
         return pa ~= nil and pa:IsValid() and pa:GetAddress() == parent:GetAddress(), false
     end
+    pcall(function() comp:SetCollisionEnabled(3) end)
     pcall(function() comp:SetSimulatePhysics(true) end)
     local ok, res = pcall(function() return StaticFindObject(MISC):WeldPrimitive(parent, comp) end)
     local welded = StaticFindObject(MISC):IsPrimitiveWelded(comp)
@@ -410,6 +439,14 @@ local function weldInto(comp, parent)
     return pa ~= nil and pa:IsValid() and pa:GetAddress() == parent:GetAddress(), welded
 end
 
+function M.weldOnBoat(comp, l)
+    local b = boatAt(l)
+    local hull = b and hullOf(b)
+    if not hull then return end
+    local attached, welded = weldInto(comp, hull)
+    log("fryst släpp svetsat direkt på båten (fäst %s, svetsad %s)", tostring(attached), tostring(welded))
+end
+
 -- Follows the boat without becoming part of the hull's body and without
 -- physics: loose on the guest's boat, which the mod places every frame, a
 -- piece shook until picked up (2026-11-18).
@@ -417,12 +454,29 @@ fastenWithoutWeld = function(comp, hull)
     pcall(function() comp:SetSimulatePhysics(false) end)
     pcall(function() comp:K2_AttachToComponent(hull, FName("None"), 1, 1, 1, false) end)
     setWelded(comp, true)
+    -- Query only: seen, aimed at and picked up, but it cannot push. With full
+    -- collision, grinder output fastened at the outlet kept shoving the hull once
+    -- this game moved the boat (2026-11-19).
+    pcall(function() comp:SetCollisionEnabled(1) end)
 end
 
 -- Host: the other player's crate after they let go falls with physics on
 -- the host's steady boat, its position streamed back to them, and once it
 -- rests in the boat's frame it is welded there like the game does on release.
 local watching = {}  -- id -> { comp, untilT, still, last }
+
+-- Anything within SUPPORT_DEPTH under the piece (the piece itself ignored). A trace
+-- that fails counts as supported, so the old behaviour stays.
+local SUPPORT_DEPTH = 120
+local function supported(comp)
+    local ok, hit = pcall(function()
+        local l = comp:K2_GetComponentLocation()
+        local col = { R = 0, G = 0, B = 0, A = 0 }
+        return StaticFindObject("/Script/Engine.Default__KismetSystemLibrary"):LineTraceSingle(comp:GetOwner(), l,
+            { X = l.X, Y = l.Y, Z = l.Z - SUPPORT_DEPTH }, 0, false, {}, 0, {}, true, col, col, 0)
+    end)
+    return not ok or hit == true
+end
 
 local function watchTick(id, w)
     local comp = w.comp
@@ -451,7 +505,26 @@ local function watchTick(id, w)
     -- A crate that landed askew on others may keep trembling; at the end of
     -- the watch it is welded where it is.
     if w.still < REST_TICKS and now() <= w.untilT then return end
+    -- Still with nothing under it is not at rest: thrown things were welded 8 m above
+    -- the deck (2026-11-19). It gets woken and watched on; at the end it is left loose.
+    local floating = not supported(comp)
+    if floating and now() <= w.untilT then
+        w.still = 0
+        if not w.floatLogged then
+            w.floatLogged = true
+            log("låda %s står still i luften, väcks och bevakas vidare: %s, %s", id, where(comp), physState(comp))
+        end
+        pcall(function() comp:SetSimulatePhysics(true) end)
+        pcall(function() comp:WakeAllRigidBodies() end)
+        return
+    end
     watching[id] = nil
+    if floating then
+        log("låda %s ligger fortfarande i luften efter bevakningen, svetsas inte: %s", id, where(comp))
+        sendProp(id, comp)
+        net.send("rest", id)
+        return
+    end
     log("låda %s slutar bevakas efter %s: %s", id, w.still >= REST_TICKS and "stilla" or "tiden", where(comp))
     local hull = b and hullOf(b)
     -- Attached with welding, like the game's own welded crates. WeldPrimitive
@@ -549,6 +622,7 @@ function M.settle(id)
     end
     -- On land the copy keeps physics: frozen, the game's grab could not lift it
     -- (2026-11-17). Only the guest's boat is too unsteady for physics.
+    pcall(function() rem.comp:SetCollisionEnabled(3) end)
     pcall(function() rem.comp:SetSimulatePhysics(true) end)
     log("föremål %s vilar hos ägaren, ligger här med fysik: %s", id, where(rem.comp))
 end
@@ -607,6 +681,8 @@ function M.tick()
             -- would pass through the hull in the hand.
             local okT, t = pcall(function() return comp:GetCollisionObjectType() end)
             if okT and t == WELDED_TYPE then setWelded(comp, false) end
+            -- A piece fastened query-only (fastenWithoutWeld) gets full collision in the hand.
+            pcall(function() comp:SetCollisionEnabled(3) end)
             log("håller %s (id %s), %s", comp:GetOwner():GetFullName(), tostring(id), physState(comp))
         end
     elseif held and not (function()
@@ -735,13 +811,14 @@ local function handleWeld(msg)
     local powner = ppc and ppc:GetOwner()
     local parent = powner and powner:IsValid() and componentNamed(powner, compName)
     if not (root and root:IsValid() and parent) then
+        if not root then noteEarly(id, "weld", msg) end
         log("svetsning %s på %s/%s: hittar inte %s", id, pid, compName, root and "föräldern" or "föremålet")
         return
     end
     remote[id] = nil
     local kml = StaticFindObject(KML)
     local loc = { X = tonumber(msg[6]), Y = tonumber(msg[7]), Z = tonumber(msg[8]) }
-    local rot = { Pitch = tonumber(msg[9]), Yaw = tonumber(msg[10]), Roll = tonumber(msg[11]) }
+    local rot = Rot(tonumber(msg[9]), tonumber(msg[10]), tonumber(msg[11]))
     -- Never WeldPrimitive(crate, hull): it welded the boat into the crate and
     -- the guest fell through the whole boat.
     pcall(function() root:SetSimulatePhysics(false) end)
@@ -761,8 +838,7 @@ current = function(rem, t)
     local k = math.max(math.min((t - rem.lastUpdate) / rem.span, 1), 0)
     return {
         loc = { X = lerp(from.loc.X, to.loc.X, k), Y = lerp(from.loc.Y, to.loc.Y, k), Z = lerp(from.loc.Z, to.loc.Z, k) },
-        rot = { Pitch = lerpAngle(from.rot.Pitch, to.rot.Pitch, k), Yaw = lerpAngle(from.rot.Yaw, to.rot.Yaw, k),
-            Roll = lerpAngle(from.rot.Roll, to.rot.Roll, k) },
+        rot = Rot(lerpAngle(RotP(from.rot), RotP(to.rot), k), lerpAngle(from.rot.Yaw, to.rot.Yaw, k), lerpAngle(from.rot.Roll, to.rot.Roll, k)),
     }
 end
 
@@ -784,8 +860,7 @@ local function stamped(rem, t)
             local k = (renderT - a.st) / math.max(b.st - a.st, 0.001)
             return {
                 loc = { X = lerp(a.loc.X, b.loc.X, k), Y = lerp(a.loc.Y, b.loc.Y, k), Z = lerp(a.loc.Z, b.loc.Z, k) },
-                rot = { Pitch = lerpAngle(a.rot.Pitch, b.rot.Pitch, k), Yaw = lerpAngle(a.rot.Yaw, b.rot.Yaw, k),
-                    Roll = lerpAngle(a.rot.Roll, b.rot.Roll, k) },
+                rot = Rot(lerpAngle(RotP(a.rot), RotP(b.rot), k), lerpAngle(a.rot.Yaw, b.rot.Yaw, k), lerpAngle(a.rot.Roll, b.rot.Roll, k)),
             }
         end
     end
@@ -834,10 +909,25 @@ function M.frame()
     end
 end
 
+-- drops.lua: the copy of the peer's drop is linked; what came before it is applied.
+function M.claimed(id)
+    local e = early[id]
+    early[id], missing[id] = nil, nil
+    if not e or now() - e.t > EARLY_SECONDS then return end
+    log("föremål %s: tillämpar det som kom före kopian (%s%s%s)", id, e.pose and "läge " or "",
+        e.rest and "vila " or "", e.weld and "svetsning" or "")
+    if e.pose then M.handle(e.pose) end
+    if e.weld then handleWeld(e.weld) elseif e.rest then M.settle(id) end
+end
+
 function M.handle(msg)
     if msg[1] == "gone" then handleGone(msg[3]) return true end
     if msg[1] == "weld" then handleWeld(msg) return true end
-    if msg[1] == "rest" then M.settle(msg[3]) return true end
+    if msg[1] == "rest" then
+        if not remote[msg[3]] and not findById(msg[3]) then noteEarly(msg[3], "rest", true) end
+        M.settle(msg[3])
+        return true
+    end
     if msg[1] == "letgo" then
         local rem = remote[msg[3]]
         if rem then rem.throw = { X = tonumber(msg[4]) or 0, Y = tonumber(msg[5]) or 0, Z = tonumber(msg[6]) or 0 } end
@@ -853,6 +943,7 @@ function M.handle(msg)
         local owner = pc and pc:GetOwner()
         local root = owner and owner:IsValid() and owner.RootComponent
         if not (root and root:IsValid()) then
+            noteEarly(id, "pose", msg)
             if not missing[id] then missing[id] = true log("föremål %s saknas här", id) end
             return true
         end
@@ -871,7 +962,7 @@ function M.handle(msg)
     end
     local t = now()
     local loc = { X = tonumber(msg[4]), Y = tonumber(msg[5]), Z = tonumber(msg[6]) }
-    local rot = { Pitch = tonumber(msg[7]), Yaw = tonumber(msg[8]), Roll = tonumber(msg[9]) }
+    local rot = Rot(tonumber(msg[7]), tonumber(msg[8]), tonumber(msg[9]))
     local key = msg[10] ~= "" and msg[10] or nil
     local st = tonumber(msg[11])
     if st then

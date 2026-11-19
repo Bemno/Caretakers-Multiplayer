@@ -178,7 +178,7 @@ local function apply(v, s)
     local l = v:K2_GetActorLocation()
     local d = math.sqrt((l.X - s.x) ^ 2 + (l.Y - s.y) ^ 2)
     if d > MOVE_TOLERANCE then
-        v:K2_SetActorLocationAndRotation({ X = s.x, Y = s.y, Z = s.z }, { Pitch = 0, Yaw = s.yaw, Roll = 0 }, false, {}, true)
+        v:K2_SetActorLocationAndRotation({ X = s.x, Y = s.y, Z = s.z }, Rot(0, s.yaw, 0), false, {}, true)
     end
     if math.abs((v.CurrentTime or 0) - s.time) > CURVE_TOLERANCE then v.CurrentTime = s.time end
     if v.CurveLengthSeconds ~= s.len then v.CurveLengthSeconds = s.len end

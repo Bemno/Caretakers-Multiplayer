@@ -191,8 +191,8 @@ def test_save_commands(tmp_path):
     b.step()
     assert f"save|0|renamed|{name}|Huset" in _in(b)
     assert "save|0|deleted|Huset" in _in(b)
-    assert not (root / "Coop" / f"{name}.sav").exists()
-    assert not (root / "Coop" / saves.VAULT).exists()
+    assert not (root / "Coop").exists()
+    assert not (tmp_path / saves.STORE / saves.VAULT).exists()
     b.link.sock.close()
 
 

@@ -131,7 +131,7 @@ local function pollShots()
     local l = kml:TransformLocation(wt, f.loc)
     local r = kml:TransformRotation(wt, f.rot)
     -- UE4SS 4.0 returns a rotator's pitch as "pitch" (Yaw and Roll as named).
-    net.send("fx", f.path, v3(l), string.format("%.1f,%.1f,%.1f", r.pitch or r.Pitch or 0, r.Yaw or 0, r.Roll or 0))
+    net.send("fx", f.path, v3(l), string.format("%.1f,%.1f,%.1f", r.pitch or RotP(r) or 0, r.Yaw or 0, r.Roll or 0))
 end
 
 -- Drawing at the other game.

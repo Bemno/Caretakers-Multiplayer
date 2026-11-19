@@ -365,7 +365,7 @@ local function pollCables()
     if first then baselineAt = now() end
     local states = {}
     local moored = false
-    local moorLines = {}
+    local moorLines, moorPaths = {}, {}
     for _, c in ipairs(allCables()) do
         local okK, key = pcall(keyOf, c)
         local okA, a, b = pcall(plugsOf, c)
@@ -375,6 +375,7 @@ local function pollCables()
                 moored = true
                 local okL, len = pcall(function() return c.Cable.CableLength end)
                 moorLines[#moorLines + 1] = a .. "|" .. b .. "|" .. (okL and math.floor((len or 0) / 50) or 0)
+                moorPaths[#moorPaths + 1] = c:GetFullName():match("%S+%s+(%S+)")
             end
         end
         -- Cables without a save id are the game's temporary previews while a
@@ -463,6 +464,7 @@ local function pollCables()
         local boat = require("boat")
         boat.moored = moored
         boat.mooringLines = table.concat(moorLines, ";")
+        boat.mooringCables = moorPaths
     end)
 end
 

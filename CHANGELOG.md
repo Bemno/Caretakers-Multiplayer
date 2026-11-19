@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.2.8 — 2026-11-19
+
+Mooring, the recycler and saves: the boat is pulled in to the quay like in singleplayer, the recycler's output lands properly for both players, and multiplayer and singleplayer saves are now kept fully apart.
+
+- Mooring: the lines pull the boat in to the quay and turn it straight; it slides along the quay and stops before the hull touches it
+- A moored boat no longer takes damage, shakes for the other player or is thrown off when let go
+- Anchors stay up while the boat is moored, for 30 s after, and when it gets throttle
+- The boat keeps its speed when the other player takes the helm
+- Recycler output no longer hangs in the air or bounces around for the other player
+- Things that come to rest in mid-air are no longer stuck there
+- A box built by one player now sits on the boat for the other player too
+- Items with the same save id in both games no longer move or remove each other
+- Multiplayer worlds are kept outside the game's save folder between sessions, so Continue in singleplayer never loads a multiplayer world
+- The save terminal and save list can't touch singleplayer saves during multiplayer
+- Looking at the other player's head to share power works again
+
+## 0.2.7 — 2026-11-19
+
+Mooring, the recycler and saves: the boat is pulled in to the quay like in singleplayer, the recycler's output lands properly for both players, and multiplayer and singleplayer saves are now kept fully apart.
+
+- Mooring: the lines pull the boat in to the quay and turn it straight; it slides along the quay and stops before the hull touches it
+- A moored boat no longer takes damage, shakes for the other player or is thrown off when let go
+- Anchors stay up while the boat is moored, for 30 s after, and when it gets throttle
+- The boat keeps its speed when the other player takes the helm
+- Recycler output no longer hangs in the air or bounces around for the other player
+- Things that come to rest in mid-air are no longer stuck there
+- A box built by one player now sits on the boat for the other player too
+- Items with the same save id in both games no longer move or remove each other
+- Multiplayer worlds are kept outside the game's save folder between sessions, so Continue in singleplayer never loads a multiplayer world
+- The save terminal and save list can't touch singleplayer saves during multiplayer
+- Looking at the other player's head to share power works again
+
 ## 0.2.6 — 2026-11-18
 
 The mod can now update itself: when a new version is out, an update button shows up in the main menu. Run this installer once by hand; after that, updates come from inside the game.

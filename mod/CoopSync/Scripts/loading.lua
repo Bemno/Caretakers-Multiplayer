@@ -84,11 +84,11 @@ local function placeCamera(c, b)
     local centre = (o.X and o) or o.Origin
     local pc = localPC()
     local cr = pc.ControlRotation
-    local cp = (cr.Pitch or 0) > 180 and cr.Pitch - 360 or (cr.Pitch or 0)
+    local cp = (RotP(cr) or 0) > 180 and RotP(cr) - 360 or (RotP(cr) or 0)
     if not aimed then
         aimed = true
         camYaw, camPitch = b:K2_GetActorRotation().Yaw + 180, START_PITCH
-        pc:SetControlRotation({ Pitch = cp, Yaw = camYaw, Roll = 0 })
+        pc:SetControlRotation(Rot(cp, camYaw, 0))
     else
         -- The control rotation's pitch is held by the game here, so mouse
         -- movement is taken as change from the last tick.
@@ -98,7 +98,7 @@ local function placeCamera(c, b)
         camPitch = math.max(MIN_PITCH, math.min(MAX_PITCH, camPitch + (cp - lastPitch)))
     end
     lastYaw, lastPitch = cr.Yaw or camYaw, cp
-    local rot = { Pitch = camPitch, Yaw = camYaw, Roll = 0 }
+    local rot = Rot(camPitch, camYaw, 0)
     local pr, yr = math.rad(camPitch), math.rad(camYaw)
     local fw = { X = math.cos(pr) * math.cos(yr), Y = math.cos(pr) * math.sin(yr), Z = math.sin(pr) }
     local aim = { X = centre.X, Y = centre.Y, Z = centre.Z + AIM_UP }

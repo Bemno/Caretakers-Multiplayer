@@ -59,7 +59,7 @@ local function entryOf(c)
     if not (kind and asset and asset:IsValid()) then return nil end
     local l, r, s = c.RelativeLocation, c.RelativeRotation, c.RelativeScale3D
     return table.concat({ kind, pathOf(asset), c:GetAttachSocketName():ToString(), f1(l.X), f1(l.Y), f1(l.Z),
-        f1(r.Pitch), f1(r.Yaw), f1(r.Roll), f1(s.X), f1(s.Y), f1(s.Z), matsOf(c) }, ",")
+        f1(RotP(r)), f1(r.Yaw), f1(r.Roll), f1(s.X), f1(s.Y), f1(s.Z), matsOf(c) }, ",")
 end
 
 local function scanWeapons(pawn)
@@ -110,7 +110,7 @@ local function weaponEntries(pawn, out)
                     -- Whole cm and degrees: read while the hand moves, tenths
                     -- changed every second and the list was sent anew each time.
                     out[#out + 1] = table.concat({ kind, pathOf(asset), socket, f0(l.X), f0(l.Y), f0(l.Z),
-                        f0(r.Pitch), f0(r.Yaw), f0(r.Roll), f1(s.X), f1(s.Y), f1(s.Z), matsOf(c) }, ",")
+                        f0(RotP(r)), f0(r.Yaw), f0(r.Roll), f1(s.X), f1(s.Y), f1(s.Z), matsOf(c) }, ",")
                 end)
             end
         end)
@@ -181,7 +181,7 @@ local function addOne(puppet, entry)
     if kind == "K" then c:SetSkeletalMeshAsset(mesh) else c:SetStaticMesh(mesh) end
     c:K2_AttachToComponent(body, FName(socket), 0, 0, 0, false)
     c:K2_SetRelativeLocationAndRotation({ X = tonumber(lx), Y = tonumber(ly), Z = tonumber(lz) },
-        { Pitch = tonumber(rp), Yaw = tonumber(ry), Roll = tonumber(rr) }, false, {}, true)
+        Rot(tonumber(rp), tonumber(ry), tonumber(rr)), false, {}, true)
     c:SetRelativeScale3D({ X = tonumber(sx), Y = tonumber(sy), Z = tonumber(sz) })
     pcall(function() c:SetCollisionEnabled(0) end)
     local slot = 0

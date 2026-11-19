@@ -1,12 +1,17 @@
-"""Multiplayer worlds in SaveGames/Coop, imports from singleplayer slots, and
-the guard that keeps a multiplayer session from changing singleplayer files.
+"""Multiplayer worlds, imports from singleplayer slots, and the guard that keeps
+a multiplayer session from changing singleplayer files.
 
-The game's autosave always writes <steamid>/<steamid>_AutoSave_N.sav and
-rotates SaveGameBackups/<steamid>/, whatever slot was loaded, and its save menu
-writes the numbered singleplayer slots. The guard copies all those files to
-Coop/.vakt when a session starts and puts them back whenever
-they change. The copy lives on disk so a crash mid-session can be undone the
-next time coopnet starts."""
+Between sessions the worlds live in Saved/CoopWorlds, outside SaveGames, so
+singleplayer never sees them: the game's "last save" (Continue) picked the
+multiplayer client copy (2026-11-19). A session moves them into SaveGames/Coop,
+where the game loads and saves them as slot "Coop/<name>", and its end moves
+them out again, with the backups the game made of them.
+
+The game's autosave writes <steamid>/<steamid>_AutoSave_N.sav and rotates
+SaveGameBackups/<steamid>/, and its save menu writes the numbered singleplayer
+slots. The guard copies all those files to CoopWorlds/.vakt when a session
+starts and puts them back whenever they change. The copy lives on disk so a
+crash mid-session can be undone the next time coopnet starts."""
 import json
 import os
 import re
@@ -16,14 +21,44 @@ import time
 CLIENT = "_klient"
 VAULT = ".vakt"
 TRASH = ".borttagna"
+BACKUPS = ".kopior"
+STORE = "CoopWorlds"
+
+
+def _move_all(src, dst, skip=()):
+    """Moves everything in src into dst, replacing files of the same name."""
+    if not os.path.isdir(src):
+        return
+    os.makedirs(dst, exist_ok=True)
+    for f in os.listdir(src):
+        if f in skip:
+            continue
+        a, b = os.path.join(src, f), os.path.join(dst, f)
+        if os.path.isdir(a):
+            _move_all(a, b)
+            shutil.rmtree(a, ignore_errors=True)
+        else:
+            os.replace(a, b)
 
 
 class Saves:
-    def __init__(self, coop_dir):
+    def __init__(self, coop_dir, store_dir=None):
         self.coop = coop_dir
         self.root = os.path.dirname(coop_dir)
-        self.backup_root = os.path.join(os.path.dirname(self.root), "SaveGameBackups")
-        self.vault = os.path.join(coop_dir, VAULT)
+        saved = os.path.dirname(self.root)
+        self.backup_root = os.path.join(saved, "SaveGameBackups")
+        self.store = store_dir or os.path.join(saved, STORE)
+        self.vault = os.path.join(self.store, VAULT)
+        self.in_session = False
+        os.makedirs(self.store, exist_ok=True)
+        # The guard's copy lived in Coop/.vakt before the worlds moved out.
+        old_vault = os.path.join(coop_dir, VAULT)
+        if os.path.isdir(old_vault) and not os.path.isdir(self.vault):
+            shutil.move(old_vault, self.vault)
+
+    def cur(self):
+        """Where the worlds are now: SaveGames/Coop during a session, else the store."""
+        return self.coop if self.in_session else self.store
 
     def _ids(self):
         if not os.path.isdir(self.root):
@@ -32,10 +67,11 @@ class Saves:
 
     def worlds(self):
         out = []
-        for f in os.listdir(self.coop):
+        d = self.cur()
+        for f in os.listdir(d) if os.path.isdir(d) else []:
             name, ext = os.path.splitext(f)
             if ext == ".sav" and name != CLIENT:
-                out.append((name, os.path.getmtime(os.path.join(self.coop, f))))
+                out.append((name, os.path.getmtime(os.path.join(d, f))))
         return sorted(out, key=lambda w: -w[1])
 
     def sp_slots(self):
@@ -53,9 +89,9 @@ class Saves:
             if os.path.isfile(src):
                 base = time.strftime("%Y-%m-%d_%H%M") + "_import"
                 name, n = base, 2
-                while os.path.exists(os.path.join(self.coop, name + ".sav")):
+                while os.path.exists(os.path.join(self.cur(), name + ".sav")):
                     name, n = f"{base}{n}", n + 1
-                shutil.copy2(src, os.path.join(self.coop, name + ".sav"))
+                shutil.copy2(src, os.path.join(self.cur(), name + ".sav"))
                 return name
         raise FileNotFoundError(f"plats {index} finns inte")
 
@@ -63,7 +99,7 @@ class Saves:
         """The file of a world, after checking the name cannot leave Coop/."""
         if name == CLIENT or not re.fullmatch(r'[^\\/:*?"<>|.][^\\/:*?"<>|]*', name):
             raise ValueError(f"ogiltigt namn {name!r}")
-        return os.path.join(self.coop, name + ".sav")
+        return os.path.join(self.cur(), name + ".sav")
 
     def _existing(self, name):
         path = self._path(name)
@@ -81,7 +117,7 @@ class Saves:
         """Moves a world to Coop/.borttagna instead of erasing it, so a wrong
         click can be undone by hand."""
         src = self._existing(name)
-        trash = os.path.join(self.coop, TRASH)
+        trash = os.path.join(self.store, TRASH)
         os.makedirs(trash, exist_ok=True)
         shutil.move(src, os.path.join(trash, f"{name}_{time.strftime('%Y%m%d_%H%M%S')}.sav"))
 
@@ -108,19 +144,22 @@ class Saves:
         return dirs
 
     def guard_on(self):
-        if os.path.exists(os.path.join(self.vault, "manifest.json")):
+        if not os.path.exists(os.path.join(self.vault, "manifest.json")):
+            os.makedirs(self.vault, exist_ok=True)
+            manifest = {}
+            for i, path in enumerate(self._watched()):
+                copy = os.path.join(self.vault, f"{i}.sav")
+                shutil.copy2(path, copy)
+                st = os.stat(path)
+                manifest[path] = {"copy": copy, "size": st.st_size, "mtime": st.st_mtime}
+            manifest["_dirs"] = self._watched_dirs()
+            with open(os.path.join(self.vault, "manifest.json"), "w", encoding="utf-8") as f:
+                json.dump(manifest, f)
+        else:
             self.guard_check()
-            return
-        os.makedirs(self.vault, exist_ok=True)
-        manifest = {}
-        for i, path in enumerate(self._watched()):
-            copy = os.path.join(self.vault, f"{i}.sav")
-            shutil.copy2(path, copy)
-            st = os.stat(path)
-            manifest[path] = {"copy": copy, "size": st.st_size, "mtime": st.st_mtime}
-        manifest["_dirs"] = self._watched_dirs()
-        with open(os.path.join(self.vault, "manifest.json"), "w", encoding="utf-8") as f:
-            json.dump(manifest, f)
+        # The client copy is not moved in: the guest has just received a new one.
+        _move_all(self.store, self.coop, skip=(VAULT, TRASH, BACKUPS, CLIENT + ".sav"))
+        self.in_session = True
 
     def guard_check(self):
         """Puts protected files back; returns the paths it touched."""
@@ -149,7 +188,14 @@ class Saves:
         return touched
 
     def guard_off(self):
+        """Ends a session: the worlds, the client copy and the game's backups of them
+        leave SaveGames, and the singleplayer guard is dropped."""
+        _move_all(self.coop, self.store)
+        shutil.rmtree(self.coop, ignore_errors=True)
+        _move_all(os.path.join(self.backup_root, "Coop"), os.path.join(self.store, BACKUPS))
+        shutil.rmtree(os.path.join(self.backup_root, "Coop"), ignore_errors=True)
         shutil.rmtree(self.vault, ignore_errors=True)
+        self.in_session = False
 
     def recover_leftover(self):
         touched = self.guard_check()

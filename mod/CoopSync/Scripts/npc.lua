@@ -113,7 +113,7 @@ local function sendOne(key, a)
         hs = { h = okH and h or (hs and hs.h), at = now() }
         healthSeen[key] = hs
     end
-    net.send("npc", key, pathOf(a:GetClass()), f1(l.X), f1(l.Y), f1(l.Z), f1(r.Yaw), f1(r.Pitch),
+    net.send("npc", key, pathOf(a:GetClass()), f1(l.X), f1(l.Y), f1(l.Z), f1(r.Yaw), f1(RotP(r)),
         string.format("%.3f", now()), hs.h and f1(hs.h) or "")
 end
 
@@ -501,7 +501,7 @@ function M.frame()
                     end
                 end
                 s = s or buf[#buf]
-                require("boat").moveActor(a, { X = s.x, Y = s.y, Z = s.z }, { Pitch = s.pitch or 0, Yaw = s.yaw, Roll = 0 })
+                require("boat").moveActor(a, { X = s.x, Y = s.y, Z = s.z }, Rot(s.pitch or 0, s.yaw, 0))
                 -- The animation reads the movement component's velocity.
                 pcall(function() a.CharacterMovement.Velocity = { X = s.vx or 0, Y = s.vy or 0, Z = s.vz or 0 } end)
             end)
@@ -560,7 +560,7 @@ function M.handle(msg)
             if who == "guest" then
                 pcall(function()
                     require("boat").moveActor(a, { X = tonumber(msg[5]), Y = tonumber(msg[6]), Z = tonumber(msg[7]) },
-                        { Pitch = 0, Yaw = tonumber(msg[8]) or 0, Roll = 0 })
+                        Rot(0, tonumber(msg[8]) or 0, 0))
                 end)
                 untame(a, key)
                 remote[key] = nil

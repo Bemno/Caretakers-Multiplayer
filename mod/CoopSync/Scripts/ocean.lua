@@ -75,7 +75,7 @@ local function hostScan(baseline)
             if not baseline and not isLinked(x.id) and not props.sentDrops[x.id] and not nearOwnPawn(x.actor) then
                 local l, r = x.actor:K2_GetActorLocation(), x.actor:K2_GetActorRotation()
                 net.send("drop", x.id, x.item:GetFullName():match("%S+%s+(%S+)"), f1(l.X), f1(l.Y), f1(l.Z),
-                    f1(r.Pitch), f1(r.Yaw), f1(r.Roll), 1)
+                    f1(RotP(r)), f1(r.Yaw), f1(r.Roll), 1, "w")
                 sent = sent + 1
                 log("värld: nytt föremål %s (id %s) skickat", x.item:GetFName():ToString(), x.id)
             end

@@ -93,7 +93,7 @@ local function send(key, a)
         if d / math.max(t - s.t, 0.001) < REST_SPEED then still = s.still + (t - s.t) end
     end
     sent[key] = { t = t, l = { X = l.X, Y = l.Y, Z = l.Z }, still = still }
-    net.send("veh", key, f1(l.X), f1(l.Y), f1(l.Z), f1(r.Pitch), f1(r.Yaw), f1(r.Roll), driving == key and "1" or "0",
+    net.send("veh", key, f1(l.X), f1(l.Y), f1(l.Z), f1(RotP(r)), f1(r.Yaw), f1(r.Roll), driving == key and "1" or "0",
         string.format("%.3f", t))
 end
 
@@ -114,8 +114,7 @@ function M.frame()
             end
             local k = (p1.st > p0.st) and math.min(math.max((show - p0.st) / (p1.st - p0.st), 0), 1) or 1
             local loc = { X = lerp(p0.l.X, p1.l.X, k), Y = lerp(p0.l.Y, p1.l.Y, k), Z = lerp(p0.l.Z, p1.l.Z, k) }
-            local rot = { Pitch = p0.r.Pitch + wrap(p1.r.Pitch - p0.r.Pitch) * k, Yaw = p0.r.Yaw + wrap(p1.r.Yaw - p0.r.Yaw) * k,
-                Roll = p0.r.Roll + wrap(p1.r.Roll - p0.r.Roll) * k }
+            local rot = Rot(RotP(p0.r) + wrap(RotP(p1.r) - RotP(p0.r)) * k, p0.r.Yaw + wrap(p1.r.Yaw - p0.r.Yaw) * k, p0.r.Roll + wrap(p1.r.Roll - p0.r.Roll) * k)
             pcall(boat.moveActor, a, loc, rot)
         end
     end
@@ -165,7 +164,7 @@ function M.handle(msg)
     local key = msg[3]
     if key == driving then return true end      -- the driver keeps it
     local l = { X = tonumber(msg[4]), Y = tonumber(msg[5]), Z = tonumber(msg[6]) }
-    local r = { Pitch = tonumber(msg[7]) or 0, Yaw = tonumber(msg[8]) or 0, Roll = tonumber(msg[9]) or 0 }
+    local r = Rot(tonumber(msg[7]) or 0, tonumber(msg[8]) or 0, tonumber(msg[9]) or 0)
     if not (l.X and l.Y and l.Z) then return true end
     if owner[key] ~= "peer" then
         owner[key] = "peer"

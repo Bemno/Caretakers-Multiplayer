@@ -49,9 +49,9 @@ It does not collect or send anything else, and it has no other servers.
 
 The mod only talks to the other player you choose to play with (through Steam, or directly on your LAN or by IP), and to GitHub to check for a newer release of this mod. It sends no data to the developer or anyone else. To turn off the update check, delete `update.ini` in `Voyage\Binaries\Win64\ue4ss\Mods\CoopSync`.
 
-## Code signing policy
+## Code signing
 
-The installer is not code signed yet; an application for free signing by SignPath Foundation is pending.
+The installer is not code signed. A code signing certificate would show the developer's legal name, and free signing for open source projects requires a larger project than this one for now. Instead, every file can be checked against this repo (see *How to check a download* above), or you can build it yourself from the source below.
 
 - Releases are built only by the [release workflow](.github/workflows/release.yml) from the source in this repo.
 - Committer, reviewer and approver: [Bemno](https://github.com/Bemno), the only maintainer. Changes from others (pull requests) are reviewed before they are merged, and every release is approved by hand.

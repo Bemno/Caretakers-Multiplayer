@@ -8,6 +8,7 @@ local M = {}
 local DYN_CLASS = "/Script/Voyage.VoyageDynamicMeshActor"
 local PERSIST_CLASS = "/Script/Voyage.VoyagePersistentActorComponent"
 local UTILS = "/Script/Voyage.Default__VoyageInventoryUtils"
+local DROP_LIFT = 20   -- cm above the sender's spot on the boat, clear of the deck
 local ARM_AFTER = 0         -- main.lua already waits until the world has settled
 local DROP_RADIUS = 500
 local MATCH_RADIUS = 400
@@ -80,7 +81,7 @@ local function onBeginPlay(ctx)
             if near and props.onBoat(l) and not props.ownsPhysicsAt(l) then
                 actor.RootComponent:SetSimulatePhysics(false)
                 local r = actor:K2_GetActorRotation()
-                entry.frozen = { loc = { X = l.X, Y = l.Y, Z = l.Z }, rot = { Pitch = r.Pitch or 0, Yaw = r.Yaw or 0, Roll = r.Roll or 0 } }
+                entry.frozen = { loc = { X = l.X, Y = l.Y, Z = l.Z }, rot = Rot(RotP(r) or 0, r.Yaw or 0, r.Roll or 0) }
             end
         end)
     end
@@ -124,6 +125,47 @@ local function countOf(actor, item)
     return (ok and n and n > 0) and n or 1
 end
 
+-- Copies without physics waiting for the sender's rest message. One never put
+-- down (the message lost, or taken by another item with the same save id)
+-- gets its place by the same rules as a rest after WAIT_FOR_REST.
+local waiting = {}          -- { path, untilT }
+-- The other game's machine output, let fall here one by one (MACHINE_GAP apart).
+local machineQueue, lastMachineDrop = {}, -100
+local MACHINE_GAP = 0.6
+
+local function releaseMachineOutput()
+    if #machineQueue == 0 or now() - lastMachineDrop < MACHINE_GAP then return end
+    local m = table.remove(machineQueue, 1)
+    local a = StaticFindObject(m.path)
+    local root = a and a:IsValid() and a.RootComponent
+    if not (root and root:IsValid()) then return end
+    lastMachineDrop = now()
+    root:SetSimulatePhysics(true)
+    root:WakeAllRigidBodies()
+    following[#following + 1] = { comp = root, id = m.id, untilT = now() + FOLLOW_SECONDS, still = 0 }
+end
+local WAIT_FOR_REST = FOLLOW_SECONDS + 10
+
+local function putDownOrphans()
+    for i = #waiting, 1, -1 do
+        local w = waiting[i]
+        if now() > w.untilT then
+            table.remove(waiting, i)
+            local a = StaticFindObject(w.path)
+            local root = a and a:IsValid() and a.RootComponent
+            if root and root:IsValid() and not root:IsSimulatingPhysics(FName("None")) then
+                local pa = root:GetAttachParent()
+                if not (pa and pa:IsValid()) then
+                    local l = root:K2_GetComponentLocation()
+                    if props.onBoat(l) then props.weldOnBoat(root, l)
+                    else root:SetSimulatePhysics(true) end
+                    log("släpp från andra: %s fick aldrig vila, läggs ner här", w.path:match("[^.]+$"))
+                end
+            end
+        end
+    end
+end
+
 -- Returns true when the actor is the copy of a peer drop.
 local function claimForPeer(actor, item, loc)
     for i, p in ipairs(pendingPeer) do
@@ -135,20 +177,39 @@ local function claimForPeer(actor, item, loc)
             props.claimedPaths[pathOf(actor)] = true
             -- This game moves the boat: the other froze its drop; this copy
             -- falls and is streamed back until it rests, then welded there.
-            if props.onBoat(p.loc) and props.ownsPhysicsAt(p.loc) then
-                props.watch(p.peerId, actor.RootComponent)
-            elseif props.onBoat(p.loc) then
-                -- The boat only follows here: physics would bounce it around.
-                -- The sender streams it and it is welded where it ends.
-                pcall(function() actor.RootComponent:SetSimulatePhysics(false) end)
+            -- Ocean trash the host found is never the boat's: floating under the hull
+            -- it was welded into it and threw the boat over (2026-11-19).
+            local root = actor.RootComponent
+            if p.world then
+                pcall(function() root:SetSimulatePhysics(true) end)
+            elseif p.machineOut and props.onBoat(p.loc) and props.ownsPhysicsAt(p.loc) then
+                -- Falls here like this game's own machine output; streamed until it rests.
+                -- One at a time: arriving in a burst, five copies at the outlet at once
+                -- got physics together and flew apart (2026-11-19).
+                pcall(function() root:SetSimulatePhysics(false) end)
+                machineQueue[#machineQueue + 1] = { path = pathOf(actor), id = p.peerId }
+            elseif p.frozen and props.onBoat(p.loc) then
+                -- The game freezes a drop on a boat and welds it where it lies; spawned
+                -- with physics on the boat this game drives, several dropped at one spot
+                -- burst apart and rolled the boat (2026-11-19, also 0.2.6). Welded here too.
+                props.weldOnBoat(actor.RootComponent, p.loc)
+            elseif props.onBoat(p.loc) and props.ownsPhysicsAt(p.loc) then
+                pcall(function() root:SetSimulatePhysics(true) end)
+                props.watch(p.peerId, root)
+            else
+                -- The sender streams it and its rest message puts it down (settle):
+                -- no physics until then, here or on a boat that only follows.
+                pcall(function() root:SetSimulatePhysics(false) end)
+                waiting[#waiting + 1] = { path = pathOf(actor), untilT = now() + WAIT_FOR_REST }
             end
             local have = item and countOf(actor, item) or p.count
             if p.count > have then
                 local ok, err = pcall(function() inventoryOf(actor):AddItems({ [item] = p.count - have }, true, true, 0) end)
                 if not ok then log("släpp från andra: kunde inte fylla på antal: %s", tostring(err)) end
             end
-            log("släpp från andra: %s som %s (id %s = deras %s), antal %d av %d", p.item, actor:GetFullName(),
-                tostring(id), p.peerId, countOf(actor, item), p.count)
+            log("släpp från andra: %s som %s (id %s = deras %s), antal %d av %d%s", p.item, actor:GetFullName(),
+                tostring(id), p.peerId, countOf(actor, item), p.count, p.machineOut and ", maskinutmatning" or "")
+            pcall(props.claimed, p.peerId)
             return true
         end
     end
@@ -198,7 +259,7 @@ local function examine(entry)
     local machine = M.machines and M.machines.nearMachine(loc, MACHINE_RADIUS)
     local mine = machine and M.machines.runsJob(machine)
     if d > DROP_RADIUS and not mine then return end
-    local id = saveId(actor)
+    local id, ownPc = saveId(actor)
     if not id then
         -- The save id may be assigned a moment after BeginPlay.
         if now() - entry.t < 2 then return "retry" end
@@ -206,14 +267,33 @@ local function examine(entry)
         return
     end
     local r = actor:K2_GetActorRotation()
-    net.send("drop", id, pathOf(item), f1(loc.X), f1(loc.Y), f1(loc.Z), f1(r.Pitch), f1(r.Yaw), f1(r.Roll), countOf(actor, item))
+    -- On a boat also its place on the boat: the receiver's boat lies elsewhere (the
+    -- follower shows it 0.12 s late), and spawned at the world spot the piece came
+    -- inside the hull and the push threw the boat over (2026-11-19, also 0.2.6).
+    local bkey, rel = "", nil
+    local b = props.boatAt(loc)
+    if b then
+        bkey = require("boat").keyOf(b)
+        rel = StaticFindObject("/Script/Engine.Default__KismetMathLibrary"):InverseTransformLocation(b:GetTransform(), loc)
+    end
+    -- "m": frozen output of this game's machine. The game that moves the boat lets
+    -- its copy fall and streams it back (claimForPeer); welded at the outlet in both
+    -- games, grinder output hung in the air there (2026-11-19).
+    local kind = entry.frozen and (mine and "m" or "f") or ""
+    net.send("drop", id, pathOf(item), f1(loc.X), f1(loc.Y), f1(loc.Z), f1(RotP(r)), f1(r.Yaw), f1(r.Roll), countOf(actor, item),
+        kind, bkey, rel and f1(rel.X) or "", rel and f1(rel.Y) or "", rel and f1(rel.Z) or "")
     props.sentDrops[id] = true
+    pcall(props.registerOwn, id, ownPc)
     -- A frozen drop is not streamed: the host's copy lands and the guest's follows.
     -- On a boat this game moves, it is watched like a let-go crate: streamed
     -- until it rests, then welded there in both games.
     -- A machine's output is not welded: welded into the hull at the outlet,
     -- still moving, the boat leaned until the piece was gone (2026-11-18).
     if entry.frozen then
+        -- The game welds a frozen drop into the hull, which fails on the boat this
+        -- game only follows (its physics off): the piece hung in the air as the boat
+        -- moved on (2026-11-19). Fastened to the hull by the mod instead.
+        if b and not props.ownsPhysicsAt(loc) then props.weldOnBoat(actor.RootComponent, loc) end
     elseif props.onBoat(loc) and props.ownsPhysicsAt(loc) and not machine then
         props.watch(id, actor.RootComponent)
     else
@@ -269,6 +349,10 @@ function M.tick()
             end
         end
     end
+    local okM, errM = pcall(releaseMachineOutput)
+    if not okM then log("släpp-fel (maskin): %s", tostring(errM)) end
+    local okO, errO = pcall(putDownOrphans)
+    if not okO then log("släpp-fel (väntande): %s", tostring(errO)) end
     for i = #pendingPeer, 1, -1 do
         if now() - pendingPeer[i].t > PENDING_TIMEOUT then
             log("släpp från andra kom aldrig fram: %s (deras id %s)", pendingPeer[i].item, pendingPeer[i].peerId)
@@ -287,10 +371,15 @@ end
 local function spawnForPeer(msg)
     local peerId, path = msg[3], msg[4]
     local loc = { X = tonumber(msg[5]), Y = tonumber(msg[6]), Z = tonumber(msg[7]) }
-    local rot = { Pitch = tonumber(msg[8]), Yaw = tonumber(msg[9]), Roll = tonumber(msg[10]) }
+    local b = msg[13] and msg[13] ~= "" and require("boat").find(msg[13])
+    if b and tonumber(msg[16]) then
+        local rel = { X = tonumber(msg[14]), Y = tonumber(msg[15]), Z = tonumber(msg[16]) + ((msg[12] == "f" or msg[12] == "m") and 0 or DROP_LIFT) }
+        loc = StaticFindObject("/Script/Engine.Default__KismetMathLibrary"):TransformLocation(b:GetTransform(), rel)
+    end
+    local rot = Rot(tonumber(msg[8]), tonumber(msg[9]), tonumber(msg[10]))
     local item = findItem(path)
     if not item then log("släpp från andra: hittar inte föremålet %s", path) return end
-    pendingPeer[#pendingPeer + 1] = { peerId = peerId, item = path, loc = loc, rot = rot, t = now(), count = tonumber(msg[11]) or 1 }
+    pendingPeer[#pendingPeer + 1] = { peerId = peerId, item = path, loc = loc, rot = rot, t = now(), count = tonumber(msg[11]) or 1, world = msg[12] == "w", frozen = msg[12] == "f" or msg[12] == "m", machineOut = msg[12] == "m" }
     local transform = {
         Translation = loc,
         Rotation = { X = 0, Y = 0, Z = 0, W = 1 },
@@ -299,8 +388,11 @@ local function spawnForPeer(msg)
     local items = {}
     items[item] = 1
     local ok, err = pcall(function()
+        -- Without physics until claimForPeer decides: spawned with it inside the
+        -- grinder (the drop often arrives seconds late), copies were shot out, bounced
+        -- about and hit the hull until the boat rolled over (2026-11-19).
         StaticFindObject(UTILS):SpawnActorsForItems(localPC():GetWorld(), transform, items,
-            { bSimulatePhysics = true, bAwake = true }, 0)
+            { bSimulatePhysics = false, bAwake = true }, 0)
     end)
     log("släpp från andra: SpawnActorsForItems(%s) -> %s", path, ok and "ok" or tostring(err))
 end
