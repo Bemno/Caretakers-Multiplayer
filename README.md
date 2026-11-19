@@ -55,6 +55,7 @@ The installer is not code signed yet; an application for free signing by SignPat
 
 - Releases are built only by the [release workflow](.github/workflows/release.yml) from the source in this repo.
 - Committer, reviewer and approver: [Bemno](https://github.com/Bemno), the only maintainer. Changes from others (pull requests) are reviewed before they are merged, and every release is approved by hand.
+- The repository account uses two-factor authentication.
 
 ## Build it yourself
 
