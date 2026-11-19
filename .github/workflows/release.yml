@@ -1,0 +1,66 @@
+name: Release
+
+# Every release file is built here from the source in this repo, never on a private machine.
+# A tag vX.Y.Z builds and publishes the release; running it by hand only builds (test).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Version
+        run: |
+          $v = if ('${{ github.ref_type }}' -eq 'tag') { '${{ github.ref_name }}'.Substring(1) } else { '0.0.0' }
+          "VERSION=$v" >> $env:GITHUB_ENV
+
+      - name: Install build tools
+        run: |
+          python -m pip install nuitka==4.3.5 pytest==9.2.0
+          if (-not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) { choco install innosetup -y --no-progress }
+
+      - name: Test coopnet
+        run: python -m pytest -q coopnet
+
+      - name: Build
+        run: python package.py $env:VERSION
+
+      - name: Attest build provenance
+        if: github.ref_type == 'tag'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/Caretakers-Multiplayer-Setup-*.exe
+            dist/Caretakers-Multiplayer-*-manual.zip
+
+      - name: Release notes
+        if: github.ref_type == 'tag'
+        env:
+          VT_API_KEY: ${{ secrets.VT_API_KEY }}
+        run: python .github/release_notes.py $env:VERSION notes.md
+
+      - name: Create release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create '${{ github.ref_name }}' --title "Caretakers Multiplayer $env:VERSION" --notes-file notes.md `
+            "dist/Caretakers-Multiplayer-Setup-$env:VERSION.exe" "dist/Caretakers-Multiplayer-$env:VERSION-manual.zip" dist/SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: dist/Caretakers-Multiplayer-*

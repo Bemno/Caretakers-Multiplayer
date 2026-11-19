@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+dist/
+notes.md
+installer/ue4ss/
+mod/CoopSync/coopnet/
