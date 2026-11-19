@@ -45,6 +45,17 @@ It does not collect or send anything else, and it has no other servers.
   ```
   This proves the file was built by this repo's workflow and not changed afterwards.
 
+## Privacy
+
+The mod only talks to the other player you choose to play with (through Steam, or directly on your LAN or by IP), and to GitHub to check for a newer release of this mod. It sends no data to the developer or anyone else. To turn off the update check, delete `update.ini` in `Voyage\Binaries\Win64\ue4ss\Mods\CoopSync`.
+
+## Code signing policy
+
+The installer is not code signed yet; an application for free signing by SignPath Foundation is pending.
+
+- Releases are built only by the [release workflow](.github/workflows/release.yml) from the source in this repo.
+- Committer, reviewer and approver: [Bemno](https://github.com/Bemno), the only maintainer. Changes from others (pull requests) are reviewed before they are merged, and every release is approved by hand.
+
 ## Build it yourself
 
 Windows, Python 3.13 and [Inno Setup 6](https://jrsoftware.org/isinfo.php):
