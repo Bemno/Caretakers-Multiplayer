@@ -150,6 +150,16 @@ local function socketKey(cable, connector)
     if name == BODY_SOCKET and pawn and pawn:IsValid() and owner:GetAddress() == pawn:GetAddress() then return "@jag#" .. BODY_SOCKET end
     local pp = puppetSocketPath()
     if pp and pathOf(owner) == pp then return "@du#" .. PUPPET_SOCKET end
+    -- Worn equipment (the backpack tank) is an actor only in the wearer's
+    -- game; the other game found no socket and made no copy of a fuel cable
+    -- to it (2026-11-20). Sent as "@rygg", a loose end at the puppet's back.
+    if pawn and pawn:IsValid() and owner:GetAddress() ~= pawn:GetAddress() then
+        local att = owner:GetAttachParentActor()
+        if att and att:IsValid() and att:GetAddress() == pawn:GetAddress()
+            and not owner.RootComponent:GetAttachSocketName():ToString():find("hand", 1, true) then
+            return "@rygg#" .. name
+        end
+    end
     return keyOf(owner) .. "#" .. name
 end
 
@@ -218,9 +228,13 @@ local function weaponSocket(sk) return sk ~= "-" and sk:find("DA_Weapon_", 1, tr
 local function sendCable(key, c, a, b)
     if weaponSocket(a) then a = "-" end
     if weaponSocket(b) then b = "-" end
+    local back = false
+    if a:sub(1, 6) == "@rygg#" then a, back = "-", true end
+    if b:sub(1, 6) == "@rygg#" then b, back = "-", true end
     local maxLen, len = lengthOf(c)
     local okL, held, x, y, z = pcall(looseEnd, c, a, b)
     if not okL then held, x, y, z = "1", "", "", "" end
+    if back then held = "2" end
     local okC, consumed = pcall(function() return c.ItemsConsumed end)
     net.send("cable", key, pathOf(c:GetClass()), a, b, maxLen, len, held, x, y, z, okC and tostring(consumed) or "")
 end
@@ -754,7 +768,7 @@ local function applyCable(cable, key, sockA, sockB, class, maxLen, len)
     if not held then hand = loose.pos end
     follow[key] = nil
     if held and copies[tostring(localId)] and (sockA == "-") ~= (sockB == "-") then
-        follow[key] = { path = pathOf(cable), side = sockA == "-" and "SphereA" or "SphereB" }
+        follow[key] = { path = pathOf(cable), side = sockA == "-" and "SphereA" or "SphereB", back = loose and loose.back }
     end
     for _, side in ipairs({ { sockA, hereA, cable.SphereA }, { sockB, hereB, cable.SphereB } }) do
         local want, have, sphere = side[1], side[2], side[3]
@@ -995,7 +1009,8 @@ local function handleCable(msg)
     if tonumber(msg[13]) then consumedOf[key] = tonumber(msg[13]) end
     if msg[9] then
         local x, y, z = tonumber(msg[10]), tonumber(msg[11]), tonumber(msg[12])
-        looseInfo[key] = { held = msg[9] == "1", pos = x and y and z and { X = x, Y = y, Z = z } or nil }
+        looseInfo[key] = { held = msg[9] == "1" or msg[9] == "2", back = msg[9] == "2",
+            pos = x and y and z and { X = x, Y = y, Z = z } or nil }
         if not looseInfo[key].held and not looseInfo[key].pos then looseInfo[key].held = true end
     end
     if (givenAway[key] or 0) > now() then return end
@@ -1157,7 +1172,12 @@ function M.tick()
             -- The other player's hand on the puppet (their weapon's socket when
             -- they hold one); a point above the puppet sat nowhere near it.
             local okG, gear = pcall(require, "gear")
-            local hand = okG and gear.weaponSocketPoint(puppet)
+            local hand
+            if f.back then
+                hand = puppet.SkeletalMeshComponent:GetSocketLocation(FName("PowerSocket"))
+            else
+                hand = okG and gear.weaponSocketPoint(puppet)
+            end
             if not hand then
                 hand = puppet:K2_GetActorLocation()
                 hand.Z = hand.Z + 100

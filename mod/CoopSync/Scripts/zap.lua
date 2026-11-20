@@ -134,6 +134,62 @@ local function pollShots()
     net.send("fx", f.path, v3(l), string.format("%.1f,%.1f,%.1f", r.pitch or RotP(r) or 0, r.Yaw or 0, r.Roll or 0))
 end
 
+-- Effects on the held weapon (the flamethrower's flame, smoke and heat haze
+-- are Niagara components on it, 2026-11-20): each one switching on or off
+-- is sent with its place relative to the hand bone; the other game runs the
+-- same system attached to the puppet's hand.
+local NIAGARA_CLASS = "/Script/Niagara.NiagaraComponent"
+-- Firing adds components of its own (the flame jet was not among those on the
+-- weapon when drawn, 2026-11-20), so the list is read again now and then.
+local FX_RESCAN = 0.3
+local fxHeld, fxComps, fxOn, fxScanAt = nil, {}, {}, -100
+
+local function pollWeaponFx()
+    local a = heldWeapon()
+    local addr = a and a:GetAddress()
+    if addr ~= fxHeld then
+        for key in pairs(fxOn) do net.send("wfx", key, "0") end
+        fxHeld, fxComps, fxOn, fxScanAt = addr, {}, {}, -100
+        if not a then return end
+    end
+    if not a then return end
+    if now() - fxScanAt >= FX_RESCAN then
+        fxScanAt = now()
+        local seen = {}
+        for _, f in ipairs(fxComps) do seen[f.path] = true end
+        for _, e in ipairs(a:K2_GetComponentsByClass(StaticFindObject(NIAGARA_CLASS)) or {}) do
+            local c = e.get and e:get() or e
+            local p = pathOf(c)
+            if not seen[p] then
+                fxComps[#fxComps + 1] = { key = c:GetFName():ToString(), path = p }
+                log("vapeneffekter: %s får %s", a:GetClass():GetFName():ToString(), c:GetFName():ToString())
+            end
+        end
+    end
+    for _, f in ipairs(fxComps) do
+        local c = StaticFindObject(f.path)
+        local on = c and c:IsValid() and c:IsActive() and c:IsVisible()
+        if on and not fxOn[f.key] then
+            local sys = c:GetAsset()
+            if sys and sys:IsValid() then
+                local root = a.RootComponent
+                local socket = root:GetAttachSocketName():ToString()
+                local body = root:GetAttachParent()
+                local kml = UEHelpers.GetKismetMathLibrary()
+                local st = body:GetSocketTransform(FName(socket), 0)
+                local l = kml:InverseTransformLocation(st, c:K2_GetComponentLocation())
+                local r = kml:InverseTransformRotation(st, c:K2_GetComponentRotation())
+                net.send("wfx", f.key, "1", pathOf(sys), socket, v3(l), string.format("%.1f,%.1f,%.1f", r.pitch or r.Pitch or 0, r.Yaw or 0, r.Roll or 0))
+                log("vapeneffekt på: %s", sys:GetFName():ToString())
+            end
+            fxOn[f.key] = true
+        elseif not on and fxOn[f.key] then
+            net.send("wfx", f.key, "0")
+            fxOn[f.key] = nil
+        end
+    end
+end
+
 -- Drawing at the other game.
 local drawn = {}           -- ray component paths on this side
 local hideAt = 0
@@ -183,7 +239,33 @@ local function playFx(msg)
         { X = l[1], Y = l[2], Z = l[3] }, { pitch = r[1], Pitch = r[1], Yaw = r[2], Roll = r[3] }, { X = 1, Y = 1, Z = 1 }, true, true, 0, false)
 end
 
+local puppetFx, puppetFxFor = {}, nil   -- key -> component path on the puppet
+
+local function handleWeaponFx(msg, puppet)
+    if not (puppet and puppet:IsValid()) then return end
+    local addr = puppet:GetAddress()
+    if puppetFxFor ~= addr then puppetFx, puppetFxFor = {}, addr end
+    local key = msg[3]
+    local old = puppetFx[key] and StaticFindObject(puppetFx[key])
+    if old and old:IsValid() then pcall(function() old:K2_DestroyComponent(old) end) end
+    puppetFx[key] = nil
+    if msg[4] ~= "1" then return end
+    local sys = load(msg[5])
+    if not sys then return end
+    local l, r = nums(msg[7] or ""), nums(msg[8] or "")
+    if #l < 3 or #r < 3 then return end
+    local c = StaticFindObject("/Script/Niagara.Default__NiagaraFunctionLibrary"):SpawnSystemAttached(sys,
+        puppet.SkeletalMeshComponent, FName(msg[6]), { X = l[1], Y = l[2], Z = l[3] }, { pitch = r[1], Pitch = r[1], Yaw = r[2], Roll = r[3] },
+        0, false, true, 0, true)
+    if c and c:IsValid() then puppetFx[key] = pathOf(c) end
+end
+
 function M.handle(msg, puppet)
+    if msg[1] == "wfx" then
+        local ok, err = pcall(handleWeaponFx, msg, puppet)
+        if not ok then log("vapeneffekt-fel: %s", tostring(err)) end
+        return true
+    end
     if msg[1] == "fx" then
         local ok, err = pcall(playFx, msg)
         if not ok then log("mynning-fel: %s", tostring(err)) end
@@ -224,6 +306,8 @@ function M.frame()
     if not ok then log("blixt-fel: %s", tostring(err)) rays = {} end
     local okS, errS = pcall(pollShots)
     if not okS then log("skott-fel: %s", tostring(errS)) held = nil end
+    local okF, errF = pcall(pollWeaponFx)
+    if not okF then log("vapeneffekt-fel: %s", tostring(errF)) fxHeld = nil end
     if hideAt > 0 and now() >= hideAt then
         hideAt = 0
         for _, path in pairs(drawn) do
@@ -236,6 +320,7 @@ end
 function M.reset()
     rays, lastRefresh, wasVisible, drawn, drawnFor, hideAt = {}, -100, false, {}, nil, 0
     held, heldSounds = nil, -1
+    fxHeld, fxComps, fxOn, fxScanAt, puppetFx, puppetFxFor = nil, {}, {}, -100, {}, nil
 end
 
 return M

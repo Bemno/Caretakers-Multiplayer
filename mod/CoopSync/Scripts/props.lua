@@ -14,6 +14,7 @@ local REMOTE_TIMEOUT = 1.5
 
 local net, log, localPC, now
 local held, heldId = nil, nil
+local hiddenOnBack = {}   -- wired id -> true: the other player carries it on the back
 local HELD_INTERVAL = 1 / 30
 local lastHeldSent = -100
 local weldSent = false
@@ -630,6 +631,7 @@ end
 local lastReweld = {}   -- id -> time
 local REWELD_GAP = 5
 
+local PICKUP_GRACE_MS = 4000
 local function reweld(d, grabbedNow)
     local actor, parent = StaticFindObject(d.child), StaticFindObject(d.parent)
     if not (actor and actor:IsValid() and parent and parent:IsValid()) then return end
@@ -653,9 +655,22 @@ local function reweld(d, grabbedNow)
         local p, l = localPC().Pawn:K2_GetActorLocation(), actor:K2_GetActorLocation()
         near = (p.X - l.X) ^ 2 + (p.Y - l.Y) ^ 2 + (p.Z - l.Z) ^ 2 < 250 ^ 2
     end)
+    -- Picking a piece up detaches it first; fastened back at once, the pickup
+    -- stalled until the game gave up and took it anyway, 3.2 s after each
+    -- press on the guest (2026-11-20). A piece still here and loose after
+    -- PICKUP_GRACE was knocked loose, not picked up.
     if near then
-        fastenWithoutWeld(root, parent)
-        log("låda %s stöttes loss intill mig, fäst utan svetsning", id)
+        local rootPath, parentPath = root:GetFullName():match("%S+%s+(%S+)"), d.parent
+        ExecuteInGameThreadWithDelay(PICKUP_GRACE_MS, function()
+            pcall(function()
+                local r, pa2 = StaticFindObject(rootPath), StaticFindObject(parentPath)
+                if not (r and r:IsValid() and pa2 and pa2:IsValid()) then return end
+                local cur = r:GetAttachParent()
+                if cur and cur:IsValid() then return end
+                fastenWithoutWeld(r, pa2)
+                log("låda %s stöttes loss intill mig, fäst utan svetsning", id)
+            end)
+        end)
         return
     end
     -- Knocked loose again right after a weld: something overlaps it, and each
@@ -671,10 +686,69 @@ local function reweld(d, grabbedNow)
     log("låda %s stöttes loss, svetsad tillbaka (fäst %s, svetsad %s)", id, tostring(attached), tostring(welded))
 end
 
+-- A crate put on the back (V while carrying) is let go by the grab and
+-- fastened to the character a moment later. Handled as a drop it was welded
+-- into the hull behind the player (2026-11-20). Release is judged after
+-- RELEASE_WAIT, and a crate on the own body is only reported: the other game
+-- hides its copy, the puppet shows it (gear.lua).
+local RELEASE_WAIT = 0.25
+local releasedAt
+local onBack = {}   -- wired id -> local id while it hangs on the own body
+
+local function onMyBody(comp)
+    local owner = comp:GetOwner()
+    local att = owner and owner:IsValid() and owner:GetAttachParentActor()
+    local pawn = localPC().Pawn
+    return att and att:IsValid() and pawn and pawn:IsValid() and att:GetAddress() == pawn:GetAddress()
+end
+
+-- Taken off the back and put down, a crate is never in the hand, and the
+-- other game's copy stayed hidden (2026-11-20). Off the body it is sent where
+-- it is and then let go like a crate from the hand.
+local function checkBack()
+    for w, localId in pairs(onBack) do
+        local pc = findById(localId)
+        local owner = pc and pc:GetOwner()
+        local root = owner and owner:IsValid() and owner.RootComponent
+        if not (root and root:IsValid()) then
+            onBack[w] = nil
+        elseif not onMyBody(root) then
+            onBack[w] = nil
+            sendProp(w, root)
+            held, heldId, weldSent = root, localId, false
+            releasedAt = now()
+            log("låda %s av ryggen", tostring(localId))
+            return
+        end
+    end
+end
+
 function M.tick()
     local comp, id = grabbed()
+    if comp then releasedAt = nil end
+    if not comp and not held and next(onBack) then
+        local okB, errB = pcall(checkBack)
+        if not okB then log("rygg-fel: %s", tostring(errB)) end
+    end
+    if not comp and held then
+        releasedAt = releasedAt or now()
+        if now() - releasedAt < RELEASE_WAIT then return end
+        releasedAt = nil
+        local okB, back = pcall(onMyBody, held)
+        if okB and back and heldId then
+            onBack[wire(heldId)] = heldId
+            net.send("onback", wire(heldId))
+            log("låda %s på ryggen", tostring(heldId))
+            held, heldId = nil, nil
+            return
+        end
+    end
     if comp then
         if not held or held:GetAddress() ~= comp:GetAddress() then
+            if id and onBack[wire(id)] then
+                onBack[wire(id)] = nil
+                log("låda %s tagen från ryggen till handen", tostring(id))
+            end
             held, heldId, weldSent = comp, id, false
             -- A crate the mod welded keeps the welded collision when grabbed
             -- (the game's grab restores what it saw at its own weld) and
@@ -934,8 +1008,29 @@ function M.handle(msg)
         M.takeOver(msg[3])
         return true
     end
+    if msg[1] == "onback" then
+        local pc = findById(msg[3])
+        local owner = pc and pc:GetOwner()
+        if owner and owner:IsValid() then
+            remote[msg[3]] = nil
+            pcall(function() owner.RootComponent:SetSimulatePhysics(false) end)
+            pcall(function() owner:SetActorEnableCollision(false) end)
+            pcall(function() owner:SetActorHiddenInGame(true) end)
+            hiddenOnBack[msg[3]] = true
+            log("låda %s på den andras rygg, kopian dold", msg[3])
+        end
+        return true
+    end
     if msg[1] ~= "prop" then return false end
     local id = msg[3]
+    if hiddenOnBack[id] then
+        hiddenOnBack[id] = nil
+        pcall(function()
+            local owner = findById(id):GetOwner()
+            owner:SetActorHiddenInGame(false)
+        end)
+        log("låda %s av den andras rygg, kopian syns igen", id)
+    end
     local rem = remote[id]
     if not rem and goneAt[id] and now() - goneAt[id] < 10 then return true end
     if not rem then

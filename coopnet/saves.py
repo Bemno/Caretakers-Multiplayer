@@ -30,7 +30,13 @@ def _move_all(src, dst, skip=()):
     if not os.path.isdir(src):
         return
     os.makedirs(dst, exist_ok=True)
-    for f in os.listdir(src):
+    # On the test bench both games' coopnet share the folder; the other one may
+    # have moved it away between the check and the listing.
+    try:
+        names = os.listdir(src)
+    except FileNotFoundError:
+        return
+    for f in names:
         if f in skip:
             continue
         a, b = os.path.join(src, f), os.path.join(dst, f)

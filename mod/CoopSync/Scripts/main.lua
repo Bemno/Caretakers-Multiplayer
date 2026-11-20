@@ -36,6 +36,7 @@ local lamp = require("lamp")
 local paint = require("paint")
 local gear = require("gear")
 local zap = require("zap")
+local drone = require("drone")
 local anim = require("anim")
 local mapicons = require("mapicons")
 local terminals = require("terminals")
@@ -640,7 +641,14 @@ end
 local function sendOwnPosition()
     local pawn = localPC().Pawn
     if not (pawn and pawn:IsValid()) then return end
+    local own = pawn
     pawn = ownBody(pawn)
+    if own ~= pawn and drone.isDrone(own) then
+        local okDr, errDr = pcall(drone.send, own)
+        if not okDr then log("drönare-sändfel: %s", tostring(errDr)) end
+    else
+        drone.stopped()
+    end
     local l = pawn:K2_GetActorLocation()
     local r = pawn:K2_GetActorRotation()
     local okD, d = pcall(onDeckNow, pawn, l, r)
@@ -660,6 +668,8 @@ local function sendOwnPosition()
         if not okN then log("anim-sändfel: %s", tostring(errN)) end
     end
     zap.frame()
+    local okDf, errDf = pcall(drone.frame, puppet)
+    if not okDf then log("drönare-fel: %s", tostring(errDf)) end
     local now = os.time()
     if now - lastPosLog >= 5 then
         lastPosLog = now
@@ -694,7 +704,7 @@ local function handle(msg)
         if msg[1] ~= "pos" and #early < EARLY_MAX then early[#early + 1] = msg end
         return
     end
-    if doors.handle(msg) or swarms.handle(msg) or props.handle(msg) or drops.handle(msg) or paint.handle(msg) or gear.handle(msg) or zap.handle(msg, puppet) or power.handle(msg) or prog.handle(msg) or build.handle(msg) or boat.handle(msg) or weather.handle(msg) or npc.handle(msg) or rec.handle(msg) or boxes.handle(msg) or machines.handle(msg) or repair.handle(msg) or vehicles.handle(msg) or lamp.handle(msg) or mapicons.handle(msg) or terminals.handle(msg) or peerinv.handle(msg) or peerpower.handle(msg) or anim.handle(msg) then return end
+    if doors.handle(msg) or swarms.handle(msg) or props.handle(msg) or drops.handle(msg) or paint.handle(msg) or gear.handle(msg) or zap.handle(msg, puppet) or drone.handle(msg) or power.handle(msg) or prog.handle(msg) or build.handle(msg) or boat.handle(msg) or weather.handle(msg) or npc.handle(msg) or rec.handle(msg) or boxes.handle(msg) or machines.handle(msg) or repair.handle(msg) or vehicles.handle(msg) or lamp.handle(msg) or mapicons.handle(msg) or terminals.handle(msg) or peerinv.handle(msg) or peerpower.handle(msg) or anim.handle(msg) then return end
     local kind = msg[1]
     if kind == "pos" then
         local s = tonumber(msg[2])
@@ -847,7 +857,7 @@ local function tick()
     timed("nät", pumpNet)
     timed("nivånamn", levelName)
     if not role then return end
-    if levelName() == "Empty" then worldSince = nil posReady, posBuf = false, {} death.reset() inv.reset() build.reset() boat.reset() weather.reset() ocean.reset() swarms.reset() npc.reset() loading.reset() boxes.reset() machines.reset() repair.reset() vehicles.reset() lamp.reset() paint.reset() gear.reset() zap.reset() mapicons.reset() terminals.reset() peerinv.reset() peerpower.reset() hostlost.reset() return end
+    if levelName() == "Empty" then worldSince = nil posReady, posBuf = false, {} death.reset() inv.reset() build.reset() boat.reset() weather.reset() ocean.reset() swarms.reset() npc.reset() loading.reset() boxes.reset() machines.reset() repair.reset() vehicles.reset() lamp.reset() paint.reset() gear.reset() zap.reset() drone.reset() mapicons.reset() terminals.reset() peerinv.reset() peerpower.reset() hostlost.reset() return end
     worldSince = worldSince or realTime()
     if role == "guest" and levelName() == "VoyageWorld2" then
         local since = realTime() - worldSince
@@ -972,6 +982,7 @@ gear.body = function()
     return (c and c:IsValid()) and c or p
 end
 zap.init(net, log, localPC, realTime)
+drone.init(net, log, localPC, realTime)
 power.setPuppetSocket(peerpower.socketPath)
 ExecuteInGameThread(function() pcall(removeOldPuppet) end)
 

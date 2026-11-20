@@ -53,8 +53,11 @@ local function runsJobAt(actorPath)
     return isHost
 end
 
+-- Blueprints are build.lua's: as machines the copy's queue was sent back and
+-- the placer's queue went 1 -> 2 (petrol generator, 2026-11-20).
 local function isMachine(owner)
     return owner and owner:IsValid() and not owner:IsA(StaticFindObject(PAWN_CLASS))
+        and not owner:GetClass():GetFName():ToString():find("Location_Fabricator", 1, true)
 end
 
 local function fabOf(id)

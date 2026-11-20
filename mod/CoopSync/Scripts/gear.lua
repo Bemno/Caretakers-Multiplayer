@@ -10,11 +10,7 @@ local POLL_SECONDS, KEEPALIVE = 1, 10
 -- The crowbar is always there but hidden until held; visible it is sent.
 local FIXED = { CharacterMesh0 = true, SK_Head = true, SK_LeftArm = true, SK_RightArm = true, SK_Foot = true }
 local KML = "/Script/Engine.Default__KismetMathLibrary"
--- Weapons are actors of their own fastened to a bone of the character
--- (the electric pistol: BP_Weapon_Electric_Pistol_C at hand_rSocket). Finding
--- them walks every object, so it is done now and then.
-local WEAPON_SCAN_SECONDS = 5
-local weaponPaths, lastWeaponScan = {}, -100
+local weaponPaths = {}
 local MESH_CLASS = "/Script/Engine.MeshComponent"
 local SKEL_CLASS = "/Script/Engine.SkeletalMeshComponent"
 local STATIC_CLASS = "/Script/Engine.StaticMeshComponent"
@@ -62,36 +58,42 @@ local function entryOf(c)
         f1(RotP(r)), f1(r.Yaw), f1(r.Roll), f1(s.X), f1(s.Y), f1(s.Z), matsOf(c) }, ",")
 end
 
-local function scanWeapons(pawn)
-    lastWeaponScan = now()
-    weaponPaths = {}
-    local addr = pawn:GetAddress()
-    for _, a in ipairs(FindObjects(0, "VoyageEquipmentActor", "", 0, 0x10, false) or {}) do
-        pcall(function()
-            if not a:IsValid() or a:GetFullName():find("Default__", 1, true) then return end
-            local own = a:GetOwner()
-            if own and own:IsValid() and own:GetAddress() == addr then weaponPaths[#weaponPaths + 1] = pathOf(a) end
-        end)
+-- Everything fastened to the character, at any depth: weapons and tools at
+-- a hand or holster bone, the backpack at PowerSocket, modules on the
+-- backpack's socket, a scope on a weapon. Each actor's meshes are placed
+-- relative to the bone its chain hangs on. Cables are power.lua's.
+local EQUIP_CLASS = "/Script/Voyage.VoyageEquipmentActor"
+
+local function anchorSocket(a, body)
+    local c = a.RootComponent
+    for _ = 1, 12 do
+        local parent = c:GetAttachParent()
+        if not (parent and parent:IsValid()) then return nil end
+        if parent:GetAddress() == body:GetAddress() then return c:GetAttachSocketName():ToString() end
+        c = parent
     end
-    M.weaponPaths = weaponPaths
 end
 
--- A weapon's meshes, placed relative to the bone its actor hangs on.
 M.weaponInHand = false
 local function weaponEntries(pawn, out)
-    if now() - lastWeaponScan >= WEAPON_SCAN_SECONDS then scanWeapons(pawn) end
     local inHand = false
     local body = pawn.Mesh
     local kml = StaticFindObject(KML)
-    for _, path in ipairs(weaponPaths) do
+    local equipCls = StaticFindObject(EQUIP_CLASS)
+    local attached = {}
+    pawn:GetAttachedActors(attached, true, true)
+    weaponPaths = {}
+    for _, x in ipairs(attached) do
         pcall(function()
-            local a = StaticFindObject(path)
-            if not (a and a:IsValid()) or a.bHidden then return end
-            local root = a.RootComponent
-            local parent = root:GetAttachParent()
-            if not (parent and parent:IsValid() and parent:GetAddress() == body:GetAddress()) then return end
-            local socket = root:GetAttachSocketName():ToString()
-            if socket:find("hand", 1, true) then inHand = true end
+            local a = x.get and x:get() or x
+            if not a:IsValid() or a.bHidden then return end
+            local cls = a:GetClass():GetFName():ToString()
+            if cls:find("Cable", 1, true) then return end
+            local socket = anchorSocket(a, body)
+            if not socket then return end
+            local isEquip = equipCls and a:IsA(equipCls)
+            if isEquip then weaponPaths[#weaponPaths + 1] = pathOf(a) end
+            if isEquip and socket:find("hand", 1, true) then inHand = true end
             local st = body:GetSocketTransform(FName(socket), 0)
             for _, e in ipairs(a:K2_GetComponentsByClass(StaticFindObject(MESH_CLASS)) or {}) do
                 pcall(function()
@@ -106,15 +108,19 @@ local function weaponEntries(pawn, out)
                     if not (kind and asset and asset:IsValid()) then return end
                     local l = kml:InverseTransformLocation(st, c:K2_GetComponentLocation())
                     local r = kml:InverseTransformRotation(st, c:K2_GetComponentRotation())
-                    local s = c:K2_GetComponentScale()
+                    -- Scale relative to the bone: the badge's world scale sat
+                    -- at 1.25 and flipped between 1.2 and 1.3 each second.
+                    local s, bs = c:K2_GetComponentScale(), st.Scale3D
+                    local function rs(v, b0) return string.format("%.2f", v / ((b0 and b0 ~= 0) and b0 or 1)) end
                     -- Whole cm and degrees: read while the hand moves, tenths
                     -- changed every second and the list was sent anew each time.
                     out[#out + 1] = table.concat({ kind, pathOf(asset), socket, f0(l.X), f0(l.Y), f0(l.Z),
-                        f0(RotP(r)), f0(r.Yaw), f0(r.Roll), f1(s.X), f1(s.Y), f1(s.Z), matsOf(c) }, ",")
+                        f0(RotP(r)), f0(r.Yaw), f0(r.Roll), rs(s.X, bs.X), rs(s.Y, bs.Y), rs(s.Z, bs.Z), matsOf(c) }, ",")
                 end)
             end
         end)
     end
+    M.weaponPaths = weaponPaths
     M.weaponInHand = inHand
 end
 

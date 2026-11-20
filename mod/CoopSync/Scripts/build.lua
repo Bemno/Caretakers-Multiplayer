@@ -60,6 +60,7 @@ local function actorsNear(loc)
 end
 
 local mountOf   -- defined further down, next to place
+local notModule -- defined further down, next to learn
 
 local function describe(fab)
     local item = fab.FabricationItemOrPattern
@@ -458,7 +459,35 @@ local function sendBuilt(f, a, id)
     log("bygge: min blueprint %s byggd till %s (id %s)", f.key, cls, id)
 end
 
+-- A portable module (petrol generator, 2026-11-20) is not attached to
+-- anything, so AttachSpawnedActor never runs for it. Then the module is a new
+-- actor with a module component where the blueprint stood, one that was not
+-- there when the blueprint was placed; never a character.
+local MODULE_COMPONENT = "/Script/Voyage.VoyageModuleComponent"
+local function guessModule(f)
+    local modCls = StaticFindObject(MODULE_COMPONENT)
+    local best, bestD
+    for p, a in pairs(actorsNear(f.loc)) do
+        if not f.near[p] and not notModule(pathOf(a:GetClass())) then
+            local c = a:GetComponentByClass(modCls)
+            if c and c:IsValid() then
+                local d = dist(a:K2_GetActorLocation(), f.loc)
+                if not bestD or d < bestD then best, bestD = a, d end
+            end
+        end
+    end
+    return best
+end
+
 local function vanished(path, f)
+    if not spawnedBy[path] and not f.guessed then
+        local okG, g = pcall(guessModule, f)
+        if okG and g then
+            f.guessed = true
+            spawnedBy[path] = pathOf(g)
+            log("bygge: ingen krokträff för %s, ny modul där den stod: %s", f.key, pathOf(g))
+        end
+    end
     local spawned = spawnedBy[path]
     if spawned then
         local a = StaticFindObject(spawned)
@@ -536,7 +565,7 @@ local CLASS_FILE = "ue4ss/Mods/CoopSync/byggklasser.txt"
 
 -- What a blueprint can never turn into; such a pair is ignored wherever it
 -- comes from (old byggklasser.txt lines, the other game's message).
-local function notModule(classPath)
+function notModule(classPath)
     return classPath:find("Character", 1, true) or classPath:find("Spawner", 1, true) or classPath:find("/AI/", 1, true)
 end
 M.notModule = notModule

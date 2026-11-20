@@ -1,22 +1,19 @@
 # Changelog
 
+## 0.2.9 — 2026-11-20
+
+Picking up, dropping and carrying for the second player: pickups are instant again, drops land on the deck, and crates can be carried on the back.
+
+- Picking things up as the second player is instant again (it took about 3 seconds)
+- Things the second player drops on the boat land on the deck instead of hanging in the air
+- Crates put on the back (V) stay there, and the other player sees them on your back
+- Fuel lines plugged into the backpack tank show for both players
+- Scopes, badges and everything else fastened to a player show on the other player
+- Portable modules built from a blueprint (petrol generator) now show for both, and are no longer queued twice
+- Flamethrower: smoke and pilot flame are sent to the other player (the flame jet itself still to come)
+- Photo drone: the other player should now see the drone while the body stays put (untested)
+
 ## 0.2.8 — 2026-11-19
-
-Mooring, the recycler and saves: the boat is pulled in to the quay like in singleplayer, the recycler's output lands properly for both players, and multiplayer and singleplayer saves are now kept fully apart.
-
-- Mooring: the lines pull the boat in to the quay and turn it straight; it slides along the quay and stops before the hull touches it
-- A moored boat no longer takes damage, shakes for the other player or is thrown off when let go
-- Anchors stay up while the boat is moored, for 30 s after, and when it gets throttle
-- The boat keeps its speed when the other player takes the helm
-- Recycler output no longer hangs in the air or bounces around for the other player
-- Things that come to rest in mid-air are no longer stuck there
-- A box built by one player now sits on the boat for the other player too
-- Items with the same save id in both games no longer move or remove each other
-- Multiplayer worlds are kept outside the game's save folder between sessions, so Continue in singleplayer never loads a multiplayer world
-- The save terminal and save list can't touch singleplayer saves during multiplayer
-- Looking at the other player's head to share power works again
-
-## 0.2.7 — 2026-11-19
 
 Mooring, the recycler and saves: the boat is pulled in to the quay like in singleplayer, the recycler's output lands properly for both players, and multiplayer and singleplayer saves are now kept fully apart.
 

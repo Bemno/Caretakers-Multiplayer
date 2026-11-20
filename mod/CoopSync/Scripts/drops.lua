@@ -17,6 +17,33 @@ local REST_MOVE, REST_TICKS = 2, 10
 local PENDING_TIMEOUT = 5
 local MACHINE_RADIUS = 400
 
+-- A frozen drop hung in the air where the hand let go, in both games
+-- (2026-11-20). It is put on whatever is under it: the floor's height is
+-- found by halving a downward trace (the hit point is an out parameter), and
+-- the piece's bounds give how far its bottom is from its origin.
+local FLOOR_DEPTH, FLOOR_STEPS = 300, 8
+local function onFloor(actor, l)
+    local ksl = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
+    local col = { R = 0, G = 0, B = 0, A = 0 }
+    local function hits(depth)
+        local ok, hit = pcall(function()
+            return ksl:LineTraceSingle(actor, l, { X = l.X, Y = l.Y, Z = l.Z - depth }, 0, false, { actor }, 0, {}, true, col, col, 0)
+        end)
+        return ok and hit == true
+    end
+    if not hits(FLOOR_DEPTH) then return nil end
+    local lo, hi = 0, FLOOR_DEPTH
+    for _ = 1, FLOOR_STEPS do
+        local mid = (lo + hi) / 2
+        if hits(mid) then hi = mid else lo = mid end
+    end
+    local o, e = {}, {}
+    actor:GetActorBounds(true, o, e, false)
+    local c, x = (o.X and o) or o.Origin, (e.X and e) or e.BoxExtent
+    local bottomBelowOrigin = l.Z - (c.Z - x.Z)
+    return { X = l.X, Y = l.Y, Z = l.Z - hi + bottomBelowOrigin + 1 }
+end
+
 local net, log, localPC, now, props
 local worldSince
 local queue = {}            -- actors that began play, checked on the next tick
@@ -81,6 +108,8 @@ local function onBeginPlay(ctx)
             if near and props.onBoat(l) and not props.ownsPhysicsAt(l) then
                 actor.RootComponent:SetSimulatePhysics(false)
                 local r = actor:K2_GetActorRotation()
+                local okF, floor = pcall(onFloor, actor, l)
+                if okF and floor and floor.Z < l.Z then l = floor end
                 entry.frozen = { loc = { X = l.X, Y = l.Y, Z = l.Z }, rot = Rot(RotP(r) or 0, r.Yaw or 0, r.Roll or 0) }
             end
         end)
