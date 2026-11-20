@@ -117,19 +117,47 @@ local function anchorDown(part)
     return ok and down == true
 end
 
--- The game that moves the boat: a raised anchor hanging with physics (given by the
--- mod, see releaseAnchors) is put back under its spool, still.
-local function stowRaisedAnchors(key, actor)
+-- The game that moves the boat. Raised anchors hang with physics under their spool,
+-- as in singleplayer and as up to 0.2.6. Only while the mod holds the boat at the
+-- quay (hull physics off, the hull placed by the mod) are they frozen and fastened
+-- to the spool: hanging then, one fell 1.6 km on its cable (2026-11-19). From 19/11
+-- to 21/11 they stayed frozen after the hold too, standing in the world or stiff on
+-- the boat, and the boat hardly moved whatever the engines did (user 2026-11-21;
+-- 0.2.6's boat.lua with the rest of the mod moved it).
+local function stowRaisedAnchors(key, actor, moored)
     local kml = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
     for _, part in ipairs(anchorParts[key] or findAnchors(key, actor)) do
         if not part.held and part.module and not anchorDown(part) then
             local a, r = StaticFindObject(part.anchor), StaticFindObject(part.root)
-            if a and a:IsValid() and r and r:IsValid() and a:IsSimulatingPhysics(FName("None")) then
-                a:SetSimulatePhysics(false)
-                a:K2_SetWorldTransform(kml:ComposeTransforms(ANCHOR_IN_ROOT, r:K2_GetComponentToWorld()), false, {}, true)
-                local cable = part.cable and StaticFindObject(part.cable)
-                if cable and cable:IsValid() then pcall(function() cable:Reset() end) end
-                log("båt %s: uppdraget ankare hängde med fysik, tillbaka under spolen", key)
+            if a and a:IsValid() and r and r:IsValid() then
+                local sim = a:IsSimulatingPhysics(FName("None"))
+                local pa = a:GetAttachParent()
+                local fastened = pa and pa:IsValid() and pa:GetAddress() == r:GetAddress()
+                if moored and (sim or not fastened) then
+                    a:SetSimulatePhysics(false)
+                    a:K2_SetWorldTransform(kml:ComposeTransforms(ANCHOR_IN_ROOT, r:K2_GetComponentToWorld()), false, {}, true)
+                    a:K2_AttachToComponent(r, FName("None"), 1, 1, 1, false)
+                    local cable = part.cable and StaticFindObject(part.cable)
+                    if cable and cable:IsValid() then pcall(function() cable:Reset() end) end
+                    log("båt %s: förtöjd, uppdraget ankare fäst vid spolen", key)
+                elseif not moored and not sim then
+                    if fastened then a:K2_DetachFromComponent(1, 1, 1, false) end
+                    a:K2_SetWorldTransform(kml:ComposeTransforms(ANCHOR_IN_ROOT, r:K2_GetComponentToWorld()), false, {}, true)
+                    local cable = part.cable and StaticFindObject(part.cable)
+                    if cable and cable:IsValid() then pcall(function() cable:Reset() end) end
+                    a:SetSimulatePhysics(true)
+                    a:SetPhysicsLinearVelocity({ X = 0, Y = 0, Z = 0 }, false, FName("None"))
+                    a:SetPhysicsAngularVelocityInDegrees({ X = 0, Y = 0, Z = 0 }, false, FName("None"))
+                    log("båt %s: uppdraget ankare hänger fritt under spolen igen", key)
+                end
+            end
+        elseif not part.held and part.module then
+            local a, r = StaticFindObject(part.anchor), StaticFindObject(part.root)
+            local pa = a and a:IsValid() and a:GetAttachParent()
+            if pa and pa:IsValid() and r and r:IsValid() and pa:GetAddress() == r:GetAddress() then
+                a:K2_DetachFromComponent(1, 1, 1, false)
+                a:SetSimulatePhysics(true)
+                log("båt %s: ankaret släppt, lossat från spolen", key)
             end
         end
     end
@@ -888,7 +916,7 @@ local function keepAnchorsUp(key, actor, why)
 end
 
 local function anchorRules(key, actor)
-    local okS, errS = pcall(stowRaisedAnchors, key, actor)
+    local okS, errS = pcall(stowRaisedAnchors, key, actor, hold[key] ~= nil)
     if not okS then log("båt %s: ankarstuvning: %s", key, tostring(errS)) end
     if #M.mooringCables > 0 then
         keepAnchorsUp(key, actor, "förtöjd")

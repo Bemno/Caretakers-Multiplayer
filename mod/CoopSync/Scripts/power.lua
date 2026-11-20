@@ -153,7 +153,11 @@ local function socketKey(cable, connector)
     -- Worn equipment (the backpack tank) is an actor only in the wearer's
     -- game; the other game found no socket and made no copy of a fuel cable
     -- to it (2026-11-20). Sent as "@rygg", a loose end at the puppet's back.
-    if pawn and pawn:IsValid() and owner:GetAddress() ~= pawn:GetAddress() then
+    -- Only while the own pawn is the character: at the wheel the pawn is the boat,
+    -- every module on it hangs on the pawn, and all the boat's cables went out as
+    -- loose ends at the back (2026-11-21).
+    if pawn and pawn:IsValid() and owner:GetAddress() ~= pawn:GetAddress()
+        and pawn:GetClass():GetFName():ToString():find("FirstPersonCharacter", 1, true) then
         local att = owner:GetAttachParentActor()
         if att and att:IsValid() and att:GetAddress() == pawn:GetAddress()
             and not owner.RootComponent:GetAttachSocketName():ToString():find("hand", 1, true) then

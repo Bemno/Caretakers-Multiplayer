@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.10 — 2026-11-21
+
+Bug fix: the boat no longer gets stuck after it has been moored.
+
+- After mooring, the raised anchors stayed frozen in the water and held the boat, so it barely moved however hard the engines ran. Raised anchors now hang free under their spools again whenever the boat is not moored.
+- When the second player drove the boat, the first player's game took every cable on the boat for a backpack cable and pulled them out and rebuilt them. Cables on the boat now stay as they are.
+
 ## 0.2.9 — 2026-11-20
 
 Picking up, dropping and carrying for the second player: pickups are instant again, drops land on the deck, and crates can be carried on the back.
