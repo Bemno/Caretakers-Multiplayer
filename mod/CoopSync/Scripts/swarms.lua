@@ -8,10 +8,12 @@
 -- each. The guest's spawners are stopped, so a new particle of its own was
 -- caused by the guest (a squid hatching when touched): it goes to the host
 -- (swg), which makes the real one and answers with its key (swa).
--- A copy the guest killed is sent back (swk) and the host kills its own; a
--- copy only counts as killed when the handler's KillCounters rose and the copy
--- was near the guest: copies also vanish on their own, and every vanished one
--- taken for a kill made the host's die too (hatchlings, 2026-11-17).
+-- A copy the guest killed is sent back (swk) and the host kills its own. The
+-- guest's kills are read from the handler's OnParticleDeath_Event: a copy whose
+-- Instigator is this player's controller. Until 2026-11-21 every copy near the
+-- guest that vanished while KillCounters rose was taken for a kill; the counter
+-- rises 0.2 for any death (night swarm dying by itself too), and the host's
+-- creatures died in batches with no hit: monsters "died of one hit" from 2an.
 -- The particles move by themselves in each game and cannot be moved from
 -- Lua, and the guest's copies died or wandered off on their own (night
 -- swarm: 90 at the host, 27 at the guest). So the host's simulation decides:
@@ -25,7 +27,6 @@ local M = {}
 local SCAN_SECONDS = 0.5
 local RADIUS = 8000           -- host: sent around each player
 local GUEST_RADIUS = 9000     -- guest: copies looked for around each player
-local KILL_RADIUS = 2500      -- a vanished copy this near the guest may be its kill
 local BASELINE_SECONDS = 20   -- the guest's own particles at load are removed
 local PENDING_SECONDS = 30    -- a copy waiting for its template gives up
 -- A copy is made again only when far off, and not often: fast hatchlings
@@ -58,8 +59,9 @@ local copies = {}             -- guest: host key -> local key
 local hostOf = {}             -- guest: local key -> host key
 local pending = {}            -- guest: host key -> { tpl, loc, vel, rot, sleeping, t }
 local sentOwn = {}            -- guest: local key -> time sent to the host
-local nearMe = {}             -- guest: local keys near the guest last scan
-local lastKills = nil         -- guest: sum of KillCounters last scan
+local myKills = {}            -- guest: host keys of copies this player killed, to send
+local selfKilling = false     -- guest: the mod's own KillParticle is running
+local deathHooked = false
 local templates = {}          -- path -> template object (loaded)
 local meta = {}               -- guest: host key -> particle as sent (to remake it)
 local killedAt = {}           -- guest: host key -> time the guest killed it
@@ -208,10 +210,70 @@ local function stopSpawners()
     end
 end
 
-local function killSum(h)
-    local sum = 0
-    pcall(function() h.KillCounters:ForEach(function(_, v) sum = sum + (v:get() or 0) end) end)
-    return sum
+-- The mod removing a copy fires the death event too; it is never a kill.
+local function killLocal(h, k)
+    selfKilling = true
+    pcall(function() h:KillParticle(k) end)
+    selfKilling = false
+end
+
+local deathLogged = 0
+local function onDeath(ctx, key)
+    if isHost or selfKilling then return end
+    local k = key:get()
+    local hk = hostOf[k]
+    if not hk then return end
+    local mine, who = false, "-"
+    pcall(function()
+        local o = ctx:get():GetParticle(k).Instigator:Get()
+        if o and o:IsValid() then
+            local pc = localPC()
+            who = o:GetFName():ToString()
+            mine = pc and (o:GetAddress() == pc:GetAddress() or (pc.Pawn and o:GetAddress() == pc.Pawn:GetAddress()))
+        end
+    end)
+    if deathLogged < 20 then
+        deathLogged = deathLogged + 1
+        log("svärm: kopia %s dog, skadad av %s%s", hk, who, mine and " (jag)" or "")
+    end
+    if mine then myKills[#myKills + 1] = hk end
+end
+
+local function hookDeath()
+    if deathHooked then return end
+    deathHooked = true
+    local ok, err = pcall(RegisterHook, "/Game/Blueprints/AI/Swarm/BP_SwarmHandler.BP_SwarmHandler_C:OnParticleDeath_Event",
+        function(ctx, _, key) pcall(onDeath, ctx, key) end)
+    log("svärm: dödskrok %s", ok and "ok" or tostring(err))
+end
+
+-- Egg sacks hatch into the swarm when hit. The guest's hatchlings were taken for
+-- its stopped spawner's and removed, and the host's sack was never hit: 2an saw
+-- the creatures for a frame and nothing came (user 2026-11-21). The guest's hit
+-- goes to the host's sack (same level path), whose hatchlings come back as copies.
+local EGG_CLASSES = { "BP_EggSack01", "BP_EggSack02", "BP_EggSack02_Child" }
+local eggHooked, eggHits, eggTry = {}, {}, -100
+local function hookEggs()
+    if #eggHooked == #EGG_CLASSES or now() - eggTry < 5 then return end
+    eggTry = now()
+    for _, n in ipairs(EGG_CLASSES) do
+        local target = string.format("/Game/Blueprints/AI/Characters/%s.%s_C:ReceiveAnyDamage", n, n)
+        if not eggHooked[n] and StaticFindObject(target) then
+            local ok, err = pcall(RegisterHook, target, function(ctx, dmg)
+                pcall(function()
+                    local path = pathOf(ctx:get())
+                    for _, e in ipairs(eggHits) do if e[1] == path then return end end
+                    eggHits[#eggHits + 1] = { path, dmg:get() }
+                end)
+            end)
+            eggHooked[n] = true
+            eggHooked[#eggHooked + 1] = n
+            log("svärm: äggkrok %s %s", n, ok and "ok" or tostring(err))
+        elseif not eggHooked[n] and StaticFindObject(string.format("/Game/Blueprints/AI/Characters/%s.%s_C", n, n)) then
+            eggHooked[n] = true
+            eggHooked[#eggHooked + 1] = n
+        end
+    end
 end
 
 local function nearSpawner(x, y, z)
@@ -240,20 +302,20 @@ local function guestScan(h)
     local me = myPlace()
     local around = keysAround(h, centres(), GUEST_RADIUS)
     lastAround = around
-    local close = me and keysAround(h, { me }, KILL_RADIUS) or {}
-    -- Kills: only when the game counted some since the last scan, and only
-    -- copies that were close to the guest and are gone now.
-    local kills = killSum(h)
-    if lastKills and kills > lastKills + 0.01 then
-        for k in pairs(nearMe) do
-            local hk = hostOf[k]
-            if hk and not around[k] then
-                copies[hk], hostOf[k], meta[hk], killedAt[hk] = nil, nil, nil, now()
-                net.send("swk", hk)
-            end
-        end
+    hookDeath()
+    hookEggs()
+    for _, e in ipairs(eggHits) do
+        net.send("swe", e[1], string.format("%.1f", e[2] or 0))
+        log("svärm: slog äggsäck %s (%.1f), till värden", e[1]:match("[^.]+$"), e[2] or 0)
     end
-    lastKills, nearMe = kills, close
+    eggHits = {}
+    for _, hk in ipairs(myKills) do
+        local k = copies[hk]
+        if k then hostOf[k] = nil end
+        copies[hk], meta[hk], killedAt[hk] = nil, nil, now()
+        net.send("swk", hk)
+    end
+    myKills = {}
     -- Copies that vanished without a kill are made again from the host's
     -- positions (swp).
     for hk, k in pairs(copies) do
@@ -276,7 +338,7 @@ local function guestScan(h)
                 net.send("swg", tostring(k), table.unpack(fields))
                 log("svärm: eget djur %s (%s) till värden", tostring(k), tostring(fields[1]):match("([^/.]+)$"))
             else
-                pcall(function() h:KillParticle(k) end)
+                killLocal(h, k)
             end
         end
     end
@@ -291,7 +353,8 @@ end
 
 function M.reset()
     lastScan, startedAt, known, copies, hostOf, pending = -100, nil, {}, {}, {}, {}
-    sentOwn, nearMe, lastKills, spawnersStopped, handlerPath = {}, {}, nil, {}, nil
+    sentOwn, myKills, spawnersStopped, handlerPath = {}, {}, {}, nil
+    eggHits = {}
     spawnerPlaces = {}
     meta, killedAt, remadeAt, lastAround = {}, {}, {}, {}
 end
@@ -325,7 +388,7 @@ function M.handle(msg)
         if k then
             copies[hk], hostOf[k] = nil, nil
             local h = handler()
-            if h then pcall(function() h:KillParticle(k) end) end
+            if h then killLocal(h, k) end
         end
         return true
     elseif kind == "swp" then
@@ -352,7 +415,7 @@ function M.handle(msg)
                 if off > DRIFT and now() - (remadeAt[hk] or -100) > REMAKE_GAP then
                     remadeAt[hk] = now()
                     if k then
-                        pcall(function() h:KillParticle(k) end)
+                        killLocal(h, k)
                         copies[hk], hostOf[k] = nil, nil
                     end
                     p.loc = want
@@ -386,6 +449,17 @@ function M.handle(msg)
                 meta[hk] = { tpl = pathOf(q.SwarmTemplate), vel = { X = 0, Y = 0, Z = 0 },
                     rot = { X = q.Rotation.X, Y = q.Rotation.Y, Z = q.Rotation.Z, W = q.Rotation.W }, sleeping = q.bSleeping, t = now() }
             end) end
+        end
+        return true
+    elseif kind == "swe" then
+        if not isHost then return true end
+        local egg = StaticFindObject(msg[3])
+        if egg and egg:IsValid() then
+            local pc = localPC()
+            local ok, err = pcall(function() egg:ReceiveAnyDamage(tonumber(msg[4]) or 1, nil, pc, pc.Pawn) end)
+            log("svärm: den andra slog äggsäck %s: %s", msg[3]:match("[^.]+$"), ok and "ok" or tostring(err))
+        else
+            log("svärm: äggsäck %s finns inte här", tostring(msg[3]))
         end
         return true
     elseif kind == "swk" then

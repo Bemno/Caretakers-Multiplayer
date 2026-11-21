@@ -77,6 +77,10 @@ local AUDIO_CLASS = "/Script/Engine.AudioComponent"
 local FX_RELEARN = 20
 local held, heldSounds = nil, -1
 local flashOf = {}         -- weapon class -> { path, loc, rot (relative to the weapon), t }
+-- A tool without a muzzle (the dismantle tool) adds sounds all the time it grinds,
+-- each taken for a shot, and the search through every Niagara component in the
+-- world ran almost every frame: 60 ms per frame at the host (2026-11-20).
+local noFlashUntil = {}    -- weapon class -> time before which no new search
 
 local function heldWeapon()
     local okG, gear = pcall(require, "gear")
@@ -124,7 +128,11 @@ local function pollShots()
     local cls = a:GetClass():GetFName():ToString()
     if cls:find("Electric", 1, true) then return end
     local f = flashOf[cls]
-    if not f or now() - f.t > FX_RELEARN then learnFlash(a, cls) f = flashOf[cls] end
+    if (not f or now() - f.t > FX_RELEARN) and now() >= (noFlashUntil[cls] or 0) then
+        learnFlash(a, cls)
+        if not flashOf[cls] then noFlashUntil[cls] = now() + FX_RELEARN end
+        f = flashOf[cls]
+    end
     if not f then return end
     local kml = UEHelpers.GetKismetMathLibrary()
     local wt = a:GetTransform()
@@ -155,6 +163,15 @@ local function pollWeaponFx()
     if not a then return end
     if now() - fxScanAt >= FX_RESCAN then
         fxScanAt = now()
+        -- Grinding makes new effect components and drops old ones; the list grew
+        -- without end while the dismantle tool was used (2026-11-20).
+        local alive = {}
+        for _, f in ipairs(fxComps) do
+            local c = StaticFindObject(f.path)
+            if c and c:IsValid() then alive[#alive + 1] = f
+            elseif fxOn[f.key] then net.send("wfx", f.key, "0") fxOn[f.key] = nil end
+        end
+        fxComps = alive
         local seen = {}
         for _, f in ipairs(fxComps) do seen[f.path] = true end
         for _, e in ipairs(a:K2_GetComponentsByClass(StaticFindObject(NIAGARA_CLASS)) or {}) do

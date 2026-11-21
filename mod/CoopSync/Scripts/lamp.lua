@@ -5,7 +5,10 @@
 local M = {}
 
 local POLL_EVERY = 0.25
-local FIND_EVERY = 5
+-- Without a lamp the search went through every spot light in the world four
+-- times a second; a lamp found is now only checked (still there, still on the
+-- own pawn) and a new search made at most this often (2026-11-21).
+local FIND_EVERY = 1
 local HEAD_UP, HEAD_AHEAD, PITCH = 160, 20, -10
 
 local net, log, localPC, now, console, puppetFn
@@ -19,6 +22,13 @@ end
 
 -- The own lamp: a SpotLightComponent on a headlight actor fastened to the
 -- own pawn.
+local function onPawn(c, pawn)
+    local o = c:GetOwner()
+    if not (o and o:IsValid()) then return false end
+    local pa = o:GetAttachParentActor()
+    return pa and pa:IsValid() and pa:GetAddress() == pawn:GetAddress()
+end
+
 local function findLamp()
     lastFind = now()
     lampPath = nil
@@ -42,7 +52,13 @@ local function f2(v) return string.format("%.2f", tonumber(v) or 0) end
 
 local function poll()
     lastPoll = now()
-    if not lampPath or now() - lastFind >= FIND_EVERY then findLamp() end
+    if lampPath then
+        local found = StaticFindObject(lampPath)
+        local pawn = localPC().Pawn
+        local okM, mine = pcall(function() return found and found:IsValid() and pawn and pawn:IsValid() and onPawn(found, pawn) end)
+        if not (okM and mine) then lampPath = nil end
+    end
+    if not lampPath and now() - lastFind >= FIND_EVERY then findLamp() end
     local c = lampPath and StaticFindObject(lampPath)
     local on, params = false, {}
     if c and c:IsValid() then

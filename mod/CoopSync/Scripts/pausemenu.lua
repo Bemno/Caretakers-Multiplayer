@@ -16,10 +16,41 @@ local doneFor            -- address of the menu we changed
 local ours = {}          -- address -> action
 local hoverWas, pending
 local savedAt = 0
+-- Load world… opens a page in the same panel listing the multiplayer worlds
+-- (user 2026-11-21); picking one loads it and the guest follows.
+local page = "main"
+local made = {}          -- address -> true for every button the mod put in the panel
+local hidden = {}        -- address -> visibility of a game button hidden on the list page
+local listSig
+local SLOTS = 10
+
+-- The menu sits inside the game's overlay widget, so it is never "in the
+-- viewport" itself; an open menu is the one that has a parent.
+local function isOpen(m)
+    if not (m:IsValid() and m:IsVisible()) then return false end
+    if m:IsInViewport() then return true end
+    local p = m:GetParent()
+    return p ~= nil and p:IsValid()
+end
+
+-- Searching every object for the menu each tick cost 0.3-0.6 ms (2026-11-21).
+-- The widget stays when closed, so once found its path is checked instead,
+-- and a new search is made at most every MENU_SEARCH_GAP seconds.
+local menuPath, lastMenuSearch = nil, -100
+local MENU_SEARCH_GAP = 0.5
 
 local function findMenu()
-    -- The menu sits inside the game's overlay widget, so it is never "in the
-    -- viewport" itself; an open menu is the one that has a parent.
+    if menuPath then
+        local m = StaticFindObject(menuPath)
+        if m and m:IsValid() then
+            local okO, open = pcall(isOpen, m)
+            if okO and open then return m end
+        else
+            menuPath = nil
+        end
+    end
+    if os.clock() - lastMenuSearch < MENU_SEARCH_GAP then return nil end
+    lastMenuSearch = os.clock()
     local ok, found = pcall(FindObjects, 0, "BP_VoyageInGameMenu_C", "", 0, RF_CLASS_DEFAULT, true)
     if ok and found and #found > 0 and not M.reported then
         M.reported = true
@@ -32,13 +63,11 @@ local function findMenu()
         end
     end
     for _, m in ipairs((ok and found) or {}) do
-        local okV, v = pcall(function()
-            if not (m:IsValid() and m:IsVisible()) then return false end
-            if m:IsInViewport() then return true end
-            local p = m:GetParent()
-            return p ~= nil and p:IsValid()
-        end)
-        if okV and v then return m end
+        local okV, v = pcall(isOpen, m)
+        if okV and v then
+            menuPath = m:GetFullName():match("%S+%s+(%S+)")
+            return m
+        end
     end
 end
 
@@ -71,14 +100,59 @@ local function saveLabel()
     return T("save_world", lobby.world())
 end
 
--- Our button takes the place of Save: the buttons from Save down are taken
--- out and put back after it (UMG has no insert).
+local function labelOf(action)
+    if action == "save" then return saveLabel() end
+    if action == "load" then return T("load_list") end
+    if action == "back" then return T("back") end
+    local empty = tonumber(action:match("^e:(%d+)$"))
+    if empty then return T("slot", empty, T("empty")) end
+    local name = action:match("^w:(.*)$") or action
+    local n = tonumber(name:match("^[Ss]lot(%d+)$"))
+    if not n then return name end
+    for _, w in ipairs(lobby.worlds) do
+        if w.name == name and w.time then return T("slot", n, os.date("%Y-%m-%d %H:%M", w.time)) end
+    end
+    return "Slot " .. n
+end
+
+-- Buttons the mod made earlier are taken out first, so a menu the game opens
+-- again never gets them twice.
+local function removeMade(panel)
+    for _, w in ipairs(children(panel)) do
+        if made[w:GetAddress()] then panel:RemoveChild(w) end
+    end
+    made, ours = {}, {}
+end
+
+local function restoreHidden(panel)
+    for _, w in ipairs(children(panel)) do
+        local v = hidden[w:GetAddress()]
+        if v ~= nil then pcall(function() w:SetVisibility(v) end) end
+    end
+    hidden = {}
+end
+
+local function addButton(menu, panel, action, slot)
+    local btn = StaticFindObject(WBL):Create(menu, StaticFindObject(BTN_CLASS), localPC())
+    if not (btn and btn:IsValid()) then return end
+    require("menu").copyLook(menu.SaveBtn, btn)
+    applySlot(panel:AddChild(btn), slot)
+    btn:SetText(FText(labelOf(action)), 0)
+    btn:SetVisibility(VISIBLE)
+    made[btn:GetAddress()] = true
+    ours[btn:GetAddress()] = action
+end
+
+-- Our buttons take the place of Save: the buttons from Save down are taken
+-- out and put back after them (UMG has no insert).
 local function change(menu)
     local save = menu.SaveBtn
     local panel = save:GetParent()
+    removeMade(panel)
+    restoreHidden(panel)
+    page = "main"
     save:SetVisibility(COLLAPSED)
     pcall(function() menu.LoadFromFileBtn:SetVisibility(COLLAPSED) end)
-    ours = {}
     if lobby.role() ~= "host" then return end
     local tail, moving = {}, false
     for _, w in ipairs(children(panel)) do
@@ -86,15 +160,38 @@ local function change(menu)
         if moving then tail[#tail + 1] = { w = w, slot = slotOf(w) } end
     end
     for _, t in ipairs(tail) do panel:RemoveChild(t.w) end
-    local btn = StaticFindObject(WBL):Create(menu, StaticFindObject(BTN_CLASS), localPC())
-    if btn and btn:IsValid() then
-        require("menu").copyLook(save, btn)
-        applySlot(panel:AddChild(btn), slotOf(menu.ContinueBtn))
-        btn:SetText(FText(saveLabel()), 0)
-        btn:SetVisibility(VISIBLE)
-        ours[btn:GetAddress()] = "save"
-    end
+    for _, action in ipairs({ "save", "load" }) do addButton(menu, panel, action, slotOf(menu.ContinueBtn)) end
     for _, t in ipairs(tail) do applySlot(panel:AddChild(t.w), t.slot) end
+end
+
+-- The ten multiplayer slots as on the Host page (user 2026-11-21): a slot's
+-- world is loaded, an empty slot does nothing here (a new world is made from
+-- the title screen). Other named worlds are not listed.
+local function worldList()
+    local byNo = {}
+    for _, w in ipairs(lobby.worlds) do
+        local n = tonumber(w.name:match("^[Ss]lot(%d+)$"))
+        if n and n >= 1 and n <= SLOTS then byNo[n] = w.name end
+    end
+    local out = {}
+    for n = 1, SLOTS do out[#out + 1] = byNo[n] and ("w:" .. byNo[n]) or ("e:" .. n) end
+    return out
+end
+
+local function showList(menu)
+    local panel = menu.SaveBtn:GetParent()
+    local slot = slotOf(menu.ContinueBtn)
+    removeMade(panel)
+    for _, w in ipairs(children(panel)) do
+        local a = w:GetAddress()
+        if hidden[a] == nil then hidden[a] = w:GetVisibility() end
+        w:SetVisibility(COLLAPSED)
+    end
+    local entries = worldList()
+    for _, action in ipairs(entries) do addButton(menu, panel, action, slot) end
+    addButton(menu, panel, "back", slot)
+    listSig = table.concat(entries, "|")
+    page = "list"
 end
 
 local function pollHover(menu)
@@ -103,13 +200,16 @@ local function pollHover(menu)
         local a = w:GetAddress()
         if ours[a] then
             if w:IsHovered() then hovered = a end
-            pcall(function() w:SetText(FText(saveLabel()), 0) end)
+            pcall(function() w:SetText(FText(labelOf(ours[a])), 0) end)
         end
     end
     hoverWas = hovered
 end
 
 function M.mouse(msg)
+    if msg[3] == "1" and doneFor then
+        log("pausmeny: klick, över %s", hoverWas and tostring(ours[hoverWas]) or "-")
+    end
     if msg[3] == "1" and hoverWas and ours[hoverWas] then pending = ours[hoverWas] end
 end
 
@@ -122,7 +222,11 @@ end
 local SAVE_NOTICES = { "BP_SaveGameIndicator_C", "BP_AutoSaveGameIndicator_C", "BP_CloudSaveGameNotificationWidget_C" }
 local lastNoticeCheck = 0
 local function hideSaveNotices()
-    if lobby.role() ~= "guest" or os.clock() - lastNoticeCheck < 0.25 then return end
+    if lobby.role() ~= "guest" then return end
+    -- Closely right after the mod's own save, otherwise now and then: three
+    -- searches of every object four times a second cost 0.3 ms a tick.
+    local gap = os.time() - lobby.lastSaveAt() < 20 and 0.25 or 2
+    if os.clock() - lastNoticeCheck < gap then return end
     lastNoticeCheck = os.clock()
     for _, cls in ipairs(SAVE_NOTICES) do
         local ok, found = pcall(FindObjects, 0, cls, "", 0, RF_CLASS_DEFAULT, true)
@@ -177,9 +281,25 @@ function M.tick()
         if menu.SaveBtn:GetVisibility() ~= COLLAPSED then menu.SaveBtn:SetVisibility(COLLAPSED) end
         if menu.LoadFromFileBtn:GetVisibility() ~= COLLAPSED then menu.LoadFromFileBtn:SetVisibility(COLLAPSED) end
     end)
-    if pending == "save" then
-        pending = nil
+    local act = pending
+    pending = nil
+    if act == "save" then
         if lobby.saveNow() then savedAt = os.time() end
+    elseif act == "load" then
+        lobby.refresh()
+        local ok, err = pcall(showList, menu)
+        if not ok then log("pausmeny-lista-fel: %s", tostring(err)) end
+    elseif act == "back" then
+        local ok, err = pcall(change, menu)
+        if not ok then log("pausmeny-fel: %s", tostring(err)) end
+    elseif act and act:sub(1, 2) == "w:" then
+        log("pausmeny: laddar %s", act:sub(3))
+        lobby.loadWorld(act:sub(3))
+    end
+    -- The world list comes from coopnet a moment after it is asked for.
+    if page == "list" and table.concat(worldList(), "|") ~= listSig then
+        local ok, err = pcall(showList, menu)
+        if not ok then log("pausmeny-lista-fel: %s", tostring(err)) end
     end
     pollHover(menu)
 end

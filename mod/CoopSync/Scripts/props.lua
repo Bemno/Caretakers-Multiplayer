@@ -54,7 +54,8 @@ local indexed = {}          -- component address -> true once in byId
 local function scanPersistent()
     if now() - lastScan < 2 then return false end
     lastScan = now()
-    local ok, found = pcall(FindObjects, 0, "VoyagePersistentActorComponent", "", 0, 0, false)
+    -- 0x30: no class defaults or templates (see boxes.scan), a third fewer.
+    local ok, found = pcall(FindObjects, 0, "VoyagePersistentActorComponent", "", 0, 0x30, false)
     if not ok or not found then
         ok, found = pcall(FindAllOf, "VoyagePersistentActorComponent")
     end
@@ -83,13 +84,16 @@ local DOOR_CLASS = "/Game/Blueprints/Modules/Utility/Door/BP_DoorBase.BP_DoorBas
 local aliased = {}          -- peer id -> our component
 local pairedLocal = {}      -- our ids that are copies of a peer object
 
-local function findById(id)
-    local paired = aliased[id]
-    if paired and paired:IsValid() then return paired end
-    -- Our copy of some other peer object that happens to carry this id. Checked
-    -- before the index too: there the peer's pose for its own new item moved our
-    -- unrelated copy, and the two games removed each other's items (2026-11-19).
-    if pairedLocal[id] then return nil end
+-- Things made during the session carry their maker on the wire: "h<id>" was
+-- made by the host, "g<id>" by the guest. Both games hand out the same new
+-- ids in step, so a bare new id named one thing here and another there: the
+-- host's rubber and the guest's cloth shared one, and poses moved the wrong
+-- copy (2026-11-19); a flamethrower the guest dropped vanished when the host
+-- picked it up (2026-11-20). Ids from the save stay bare, the same in both.
+local ownNew = {}           -- our ids made here this session
+local function myTag() return M.isHost and "h" or "g" end
+
+local function findLocal(id)
     local hit = byId[id]
     if hit and hit:IsValid() then return hit end
     -- Each component is indexed once it has its id, and only after a fresh
@@ -108,6 +112,51 @@ local function findById(id)
     return nil
 end
 
+-- Levels of a portable module (barrel, battery): each game counts its resources
+-- itself, and a half-full diesel barrel carried by one came out full or empty at
+-- the other (user 2026-11-18). The one who let it go sends what it held, the
+-- other sets its copy exactly. Resource types 0..31 with a capacity.
+local MODULE_CLASS = "/Script/Voyage.VoyageModuleComponent"
+local function levelsOf(actor)
+    local m = actor:GetComponentByClass(StaticFindObject(MODULE_CLASS))
+    if not (m and m:IsValid()) then return nil end
+    local out = {}
+    for t = 0, 31 do
+        local okM, max = pcall(function() return m:GetMaxResourceAmount(t) end)
+        if okM and max and max > 0 then
+            out[#out + 1] = string.format("%d=%.2f", t, m:GetTotalResourcesAmountForType(t))
+        end
+    end
+    if #out > 0 then return table.concat(out, ",") end
+end
+
+local function sendLevels(comp, wiredId)
+    local okL, lv = pcall(function() return levelsOf(comp:GetOwner()) end)
+    if okL and lv then net.send("lvl", wiredId, lv) end
+end
+
+local function findById(id)
+    -- Save ids are mostly large negative numbers.
+    local tag, rest = id:match("^([hg])(%-?%d+)$")
+    if tag then
+        if tag == myTag() then return findLocal(rest) end
+        local paired = aliased[id]
+        if paired and paired:IsValid() then return paired end
+        return nil
+    end
+    local paired = aliased[id]
+    if paired and paired:IsValid() then return paired end
+    -- Our copy of some other peer object that happens to carry this id. Checked
+    -- before the index too: there the peer's pose for its own new item moved our
+    -- unrelated copy, and the two games removed each other's items (2026-11-19).
+    if pairedLocal[id] then return nil end
+    -- Nor something we made this session: the peer names those "h"/"g". A bare
+    -- id here is something the peer's game made unmarked; its removal took
+    -- the guest's own fresh iron with the same id (2026-11-20).
+    if ownNew[id] then return nil end
+    return findLocal(id)
+end
+
 -- Objects that disappear for real (picked up into the inventory, demolished)
 -- end play with reason Destroyed; streaming out uses other reasons. The other
 -- game removes the same object. Ids removed on request are not echoed back.
@@ -117,9 +166,17 @@ local removedByPeer = {}
 -- Items dropped by one player get a different save id in each game; toPeer
 -- translates our id to theirs when sending, byId maps theirs to our component.
 local toPeer = {}
-local function wire(id) return toPeer[id] or id end
+local function wire(id)
+    if toPeer[id] then return toPeer[id] end
+    if ownNew[id] then return myTag() .. id end
+    return id
+end
 
 M.wire = wire
+-- Something made here this session (a drop, a module, a cable, ocean loot).
+function M.markOwn(id) if id then ownNew[tostring(id)] = true end end
+-- Our copy of something the peer made.
+function M.isCopy(id) return toPeer[id] ~= nil end
 function M.suppressGone(localId) removedByPeer[localId] = true end
 -- Local clean-ups (the guest emptying its copy of the host's inventory) are
 -- not removals the peer should mirror.
@@ -131,6 +188,7 @@ M.findById = function(id) return findById(id) end
 -- other game's poses for it came first: "saknas här", and the grinder's output hung
 -- at the outlet in this game (2026-11-19).
 function M.registerOwn(id, pc)
+    ownNew[id] = true
     byId[id] = pc
     local ok, addr, raw = pcall(function() return pc:GetAddress(), pc.PersistentUniqueId end)
     if ok then indexed[addr] = raw end
@@ -142,11 +200,24 @@ function M.alias(peerId, localId, pc)
     if localId ~= peerId then pairedLocal[localId] = true end
 end
 
+-- The player character and what hangs on it (equipment, weapons, named after
+-- the character) carry the same save id in both games, since both load one
+-- save. The host leaving its world sent its character as gone, and the guest
+-- removed its own (2026-11-21). Equipment is synced by gear.lua, never here.
+-- Matched by name only: a crate stowed on the back hangs on the character too
+-- and still counts when it goes.
+local PLAYER_CLASS = "BP_FirstPersonCharacter_New_C"
+local function onPlayerBody(actor)
+    local ok, res = pcall(function() return actor:GetFName():ToString():find(PLAYER_CLASS, 1, true) ~= nil end)
+    return ok and res
+end
+
 local function onEndPlay(ctx, reason)
     local okR, r = pcall(function() return reason:get() end)
     if not okR or r ~= END_DESTROYED then return end
     if os.time() < muteUntil then return end
     local actor = ctx:get()
+    if onPlayerBody(actor) then return end
     local pc = actor:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
     if not (pc and pc:IsValid()) then return end
     local id = idOf(pc)
@@ -168,16 +239,26 @@ local detached = {}   -- { child = path, parent = path }, queued by the hook
 
 -- Registered once the world has settled; during loading EndPlay runs for many
 -- actors and entering Lua that often has crashed UE4SS.
-local armed = false
+-- The hooks stay registered when a world is left and the next one loads; they
+-- only act while live (from arm in a settled world until pause/reset). Live
+-- through a reload, the teardown and the load sent removals of the save's
+-- own objects to the other game.
+-- pause holds until the world is left (reset): main arms every tick, and
+-- re-armed before the teardown ran, the host still sent its own pawn as gone.
+local armed, live, held = false, false, false
+function M.pause() live, held = false, true end
 function M.arm()
+    if not held then live = true end
     if armed then return end
     armed = true
     local ok, err = pcall(RegisterEndPlayPreHook, function(ctx, reason)
+        if not live then return end
         local okCb, errCb = pcall(onEndPlay, ctx, reason)
         if not okCb then log("endplay-fel: %s", tostring(errCb)) end
     end)
     log("borttagningssynk: %s", ok and "ok" or tostring(err))
     local okD, errD = pcall(RegisterHook, DETACH_HOOK, function(_, child, parent)
+        if not live then return end
         pcall(function()
             local c, p = child:get(), parent:get()
             if c and c:IsValid() and p and p:IsValid() and p:GetFName():ToString() == "VehicleMesh"
@@ -210,6 +291,23 @@ local function grabbed()
     -- boat.lua and power.lua sync their values.
     local lever = StaticFindObject("/Script/Voyage.VoyageModuleGenericSwitchActor")
     if lever and lever:IsValid() and owner:IsA(lever) then return nil end
+    local pc = owner:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
+    if not (pc and pc:IsValid()) then return comp, nil end
+    return comp, idOf(pc)
+end
+
+-- What the game itself has on the player's back (PhysicsGrabComponent
+-- .StowedComponent): anything grabbable under MaxMassStow and
+-- MaxStowBoundsRadius, stowed from the hand or straight from the ground.
+local function stowed()
+    local pawn = localPC().Pawn
+    if not (pawn and pawn:IsValid()) then return nil end
+    local grab = pawn:GetComponentByClass(StaticFindObject(GRAB_CLASS))
+    if not (grab and grab:IsValid()) then return nil end
+    local comp = grab.StowedComponent:Get()
+    if not (comp and comp:IsValid()) then return nil end
+    local owner = comp:GetOwner()
+    if not (owner and owner:IsValid()) then return nil end
     local pc = owner:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
     if not (pc and pc:IsValid()) then return comp, nil end
     return comp, idOf(pc)
@@ -707,7 +805,7 @@ end
 -- it is and then let go like a crate from the hand.
 local function checkBack()
     for w, localId in pairs(onBack) do
-        local pc = findById(localId)
+        local pc = findById(w)
         local owner = pc and pc:GetOwner()
         local root = owner and owner:IsValid() and owner.RootComponent
         if not (root and root:IsValid()) then
@@ -726,6 +824,16 @@ end
 function M.tick()
     local comp, id = grabbed()
     if comp then releasedAt = nil end
+    -- Stowed straight from the ground it was never in the hand, and the other
+    -- game's copy stayed where it lay. The game's own stowed slot is read.
+    local okS, sComp, sId = pcall(stowed)
+    if okS and sComp and sId and not onBack[wire(sId)]
+        and not (comp and comp:GetAddress() == sComp:GetAddress()) and onMyBody(sComp) then
+        onBack[wire(sId)] = sId
+        net.send("onback", wire(sId))
+        log("låda %s på ryggen (spelets ryggplats)", tostring(sId))
+        if heldId == sId then held, heldId, releasedAt = nil, nil, nil end
+    end
     if not comp and not held and next(onBack) then
         local okB, errB = pcall(checkBack)
         if not okB then log("rygg-fel: %s", tostring(errB)) end
@@ -736,9 +844,11 @@ function M.tick()
         releasedAt = nil
         local okB, back = pcall(onMyBody, held)
         if okB and back and heldId then
-            onBack[wire(heldId)] = heldId
-            net.send("onback", wire(heldId))
-            log("låda %s på ryggen", tostring(heldId))
+            if not onBack[wire(heldId)] then
+                onBack[wire(heldId)] = heldId
+                net.send("onback", wire(heldId))
+                log("låda %s på ryggen", tostring(heldId))
+            end
             held, heldId = nil, nil
             return
         end
@@ -772,6 +882,7 @@ function M.tick()
             pcall(function() held:GetOwner():SetActorEnableCollision(false) end)
             remote[wire(heldId)] = { comp = root, lastUpdate = now() + FREEZE_GRACE }
             net.send("letgo", wire(heldId), f1(v.X), f1(v.Y), f1(v.Z))
+            sendLevels(held, wire(heldId))
             log("släpper id %s: %s", tostring(heldId), where(root))
         end
         log("släppt id %s, den andra tar över fysiken", tostring(heldId))
@@ -782,6 +893,7 @@ function M.tick()
         if heldId and held:IsValid() and not weldSent then
             watching[wire(heldId)] = { comp = held, untilT = now() + WATCH_SECONDS, still = 0, own = true }
         end
+        if heldId and held:IsValid() then sendLevels(held, wire(heldId)) end
         log("släppt id %s, svetsad %s", tostring(heldId), tostring(weldSent))
         held, heldId = nil, nil
     end
@@ -820,17 +932,6 @@ function M.tick()
 end
 
 -- Test bench helper: the item shown by some loaded dynamic mesh actor.
-function M.sampleItem()
-    for _, pc in ipairs(persistComps) do
-        local ok, item = pcall(function()
-            local owner = pc:GetOwner()
-            local it = owner.CurrentVisualizeItem
-            if it and it:IsValid() then return it end
-        end)
-        if ok and item then return item end
-    end
-end
-
 -- A pose that arrives after the item went at its owner found another item
 -- with the same new save id here (both games hand out the same ones) and
 -- moved that (2026-11-16).
@@ -1008,6 +1109,22 @@ function M.handle(msg)
         M.takeOver(msg[3])
         return true
     end
+    if msg[1] == "lvl" then
+        local pc = findById(msg[3])
+        local owner = pc and pc:GetOwner()
+        local m = owner and owner:IsValid() and owner:GetComponentByClass(StaticFindObject(MODULE_CLASS))
+        if not (m and m:IsValid()) then log("nivå för %s: ingen modul här", msg[3]) return true end
+        local done = {}
+        for ts, ws in (msg[4] or ""):gmatch("(%d+)=([%-%d%.]+)") do
+            local t, want = tonumber(ts), tonumber(ws)
+            local cur = m:GetTotalResourcesAmountForType(t)
+            -- AddResource takes a negative amount exactly (RemoveResource lagged, arkiv).
+            if math.abs(want - cur) > 0.01 then m:AddResource(t, want - cur) end
+            done[#done + 1] = string.format("%d: %.1f -> %.1f", t, cur, m:GetTotalResourcesAmountForType(t))
+        end
+        log("nivå för %s satt (%s)", msg[3], table.concat(done, ", "))
+        return true
+    end
     if msg[1] == "onback" then
         local pc = findById(msg[3])
         local owner = pc and pc:GetOwner()
@@ -1078,6 +1195,21 @@ function M.handle(msg)
     rem.to, rem.boatKey, rem.lastUpdate = { loc = loc, rot = rot }, key, t
     place(rem, t)
     return true
+end
+
+-- A new world in the same game run (the guest following the host to another
+-- world, a rejoin): ids, pairings and indexed components of the old world
+-- must not carry over. A freed address with the same save id kept pointing at
+-- the old, invalid component, and old pairings sent our ids as the peer's.
+function M.reset()
+    held, heldId, releasedAt, weldSent, lastHeldSent = nil, nil, nil, false, -100
+    hiddenOnBack, remote, missing, early = {}, {}, {}, {}
+    M.sentDrops, M.claimedPaths = {}, {}
+    persistComps, byId, indexed, lastScan = {}, {}, {}, -100
+    aliased, pairedLocal, ownNew, toPeer, removedByPeer = {}, {}, {}, {}, {}
+    detached, boundsCache, watching, lastReweld, onBack, goneAt = {}, {}, {}, {}, {}, {}
+    muteUntil, stampOffset = 0, nil
+    live, held = false, false
 end
 
 return M

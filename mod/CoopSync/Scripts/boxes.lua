@@ -81,25 +81,29 @@ local function isContainer(owner)
     return owner:GetClass():GetFName():ToString():sub(1, 13) == "BP_Inventory_"
 end
 
-local function idOfActor(owner)
+local function idOfActor(owner, persistCls)
     -- Placed in the level: the same name in both games, while the save id can
     -- be shared (props.idOf).
     local path = owner:GetFullName():match("%S+%s+(%S+)")
     if path and path:find("_UAID_", 1, true) then return path end
-    local pc = owner:GetComponentByClass(StaticFindObject("/Script/Voyage.VoyagePersistentActorComponent"))
+    local pc = owner:GetComponentByClass(persistCls or StaticFindObject("/Script/Voyage.VoyagePersistentActorComponent"))
     local id = pc and pc:IsValid() and pc.PersistentUniqueId
     if not id or id == 0 then return nil end
     return tostring(id)
 end
 
+-- 0x30 leaves out class defaults and templates (archetypes), exactly the ones
+-- named Default__/_GEN_VARIABLE (measured, testbank/motor/skanpris.lua); with
+-- the class looked up once, the scan took half the time (2026-11-21).
 local function scan()
     candidates = {}
-    local ok, comps = pcall(FindObjects, 0, "VoyageBaseInventoryComponent", "", 0, 0x10, false)
+    local persistCls = StaticFindObject("/Script/Voyage.VoyagePersistentActorComponent")
+    local ok, comps = pcall(FindObjects, 0, "VoyageBaseInventoryComponent", "", 0, 0x30, false)
     for _, c in ipairs((ok and comps) or {}) do
         pcall(function()
             local owner = c:GetOwner()
             if owner and owner:IsValid() and isContainer(owner) and not (M.skip and M.skip(owner)) then
-                local id = idOfActor(owner)
+                local id = idOfActor(owner, persistCls)
                 if id then candidates[#candidates + 1] = { path = pathOf(c), id = id } end
             end
         end)
@@ -192,7 +196,7 @@ end
 -- their C++ module component, filtered on the owner's class name.
 function M.modulesNamed(match)
     local out = {}
-    local ok, comps = pcall(FindObjects, 0, "VoyageModuleComponent", "", 0, 0x10, false)
+    local ok, comps = pcall(FindObjects, 0, "VoyageModuleComponent", "", 0, 0x30, false)
     for _, c in ipairs((ok and comps) or {}) do
         pcall(function()
             local owner = c:GetOwner()

@@ -44,7 +44,12 @@ def _move_all(src, dst, skip=()):
             _move_all(a, b)
             shutil.rmtree(a, ignore_errors=True)
         else:
-            os.replace(a, b)
+            # Moved by the other coopnet in the meantime (both start together on
+            # the bench and in split screen; one died here, 2026-11-21).
+            try:
+                os.replace(a, b)
+            except FileNotFoundError:
+                pass
 
 
 class Saves:

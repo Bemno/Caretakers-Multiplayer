@@ -23,7 +23,7 @@ local hostWorld              -- the host's world name, sent before the world fil
 local pendingLoad                -- slot name to load once on the title screen
 
 -- What the menu shows.
-M.worlds, M.spSlots, M.friends = {}, {}, {}
+M.worlds, M.spSlots = {}, {}
 -- Set by friends.lua: a host we joined, and Steam's "Join game"; by main.lua:
 -- the multiplayer session ended (back on the title screen).
 M.onJoinedHost, M.onJoinRequest, M.onLeave = nil, nil, nil
@@ -36,6 +36,23 @@ M.lanServers = {}
 local LAN_SECONDS = 6
 local LEAVE_SECONDS = 5
 local wasInMp, onTitleSince = false, nil
+-- The host leaving its world (Load in the Esc menu, back to the title to play
+-- another slot) tells the guest, which goes to the title and joins again: the
+-- host's next world comes over the usual join. Loading it inside the old
+-- world crashed the guest (2026-11-17), so the way goes through the title.
+local moveSent = false          -- host: told the guest about this departure
+local followHost = false        -- guest: the host left, follow once settled
+local FOLLOW_AFTER = 10         -- s in the world before the guest leaves it
+-- A world being loaded from the title screen: the title shows ("Empty") for
+-- the whole load, and the session must not count as over meanwhile.
+local travelingSince
+local TRAVEL_LIMIT = 300
+-- A new world left the map once more before it settled (2026-11-21: the
+-- session ended 15 s after "New world"); for a while after creating one,
+-- leaving the map counts as part of the load.
+local CREATE_SECONDS = 90
+local creatingUntil = 0
+local lastLevel
 -- Our name goes to the other player during a session (pname), again when it
 -- changes and now and then, so it arrives whatever the timing of hello.
 local sentName, lastNameSent = nil, 0
@@ -47,7 +64,7 @@ M.status, M.me, M.code, M.modWarning = "", nil, nil, nil
 -- One-off messages ("Deleted x", "Invite copied") fade after a few seconds;
 -- progress messages stay until something replaces them.
 local STATUS_SECONDS = 6
-local STICKY = { joining = true, waiting = true, receiving = true, loading = true, loading_host = true, creating = true }
+local STICKY = { joining = true, reconnecting = true, waiting = true, receiving = true, loading = true, loading_host = true, creating = true }
 local statusAt, statusSticky = 0, false
 
 local function status(key, ...)
@@ -67,11 +84,26 @@ local function coopDir()
     return (os.getenv("LOCALAPPDATA") or "") .. "\\Voyage\\Saved\\SaveGames\\Coop\\"
 end
 
+-- Looked up every tick in a world: FindAllOf walks every object (0.7 ms a
+-- tick, 2026-11-21), so the path is kept and the search only made again when
+-- it no longer names a live subsystem (a new world).
+local subPath
 local function subsystem()
+    if subPath then
+        local s = StaticFindObject(subPath)
+        if s and s:IsValid() then return s end
+        subPath = nil
+    end
     for _, s in ipairs(FindAllOf("VoyageGameStateSubsystem") or {}) do
-        if s:IsValid() then return s end
+        if s:IsValid() then
+            subPath = s:GetFullName():match("%S+%s+(%S+)")
+            return s
+        end
     end
 end
+
+-- When the mod last asked for a save (pausemenu hides the save notice then).
+function M.lastSaveAt() return lastSave end
 
 local function readModList()
     local f = io.open("ue4ss/Mods/mods.txt", "r")
@@ -108,6 +140,7 @@ local function loadSlot(slot)
     end
     local ok = UEHelpers.GetGameInstance():TravelToWorldWithSaveGame(MAP, save, slot, { InternalId = 0 })
     log("laddar %s: %s", slot, tostring(ok))
+    if ok then travelingSince = os.time() end
     return ok
 end
 
@@ -299,6 +332,7 @@ function M.newWorld(name, mode)
         return UEHelpers.GetGameInstance():TravelToWorldWithSaveGame(MAP, save, slot, { InternalId = 0 })
     end)
     log("ny värld %s: %s", name, tostring(res))
+    if res then creatingUntil = os.time() + CREATE_SECONDS end
     -- The first periodic save writes Coop/<name>.sav.
     lastSave = -SAVE_EVERY
     return true
@@ -306,7 +340,7 @@ end
 
 -- Saves the multiplayer world now (the host's Save in the Esc menu).
 function M.saveNow()
-    if role ~= "host" or not world then return false end
+    if role ~= "host" or not world or pendingLoad then return false end
     local sub = subsystem()
     if not sub then return false end
     lastSave = os.time()
@@ -321,15 +355,44 @@ function M.import(index)
 end
 
 function M.copyInvite() net.send("steam", "clip") end
-function M.pasteInvite() net.send("steam", "readclip") end
-function M.listFriends() M.friends = {} net.send("steam", "friends") end
-function M.invite(id) net.send("steam", "invite", id) status("invite_sent") end
 
 -- The guest waits for a host that went away: once back on the title screen
 -- (leave), the same join again; it repeats its hello until the host answers.
 local rejoinPeer
 function M.rejoinFromTitle()
     rejoinPeer = joinPeer
+end
+
+-- Host: load a multiplayer world from its last save (the Esc menu's list, the
+-- current world too). Through the title screen like the guest, so every
+-- module starts over from the save; the guest follows (hostmove).
+function M.loadWorld(name)
+    name = name or world
+    if role ~= "host" or not name or levelName() ~= MAP then return false end
+    log("laddar %s från senaste sparningen (spelade %s)", name, tostring(world))
+    status("loading", name)
+    -- What the teardown removes is not news for the guest.
+    pcall(function() require("props").pause() require("drops").pause() end)
+    -- world changes on the title screen (tick): until then the old world's
+    -- player and saves must not be written under the new name.
+    pendingLoad = "Coop/" .. name
+    pcall(function() UEHelpers.GetGameInstance():GotoInitialState() end)
+    return true
+end
+
+function M.reloadWorld() return M.loadWorld(world) end
+
+function M.isJoining() return joining end
+-- A guest on the title screen on its way into the host's world: joining,
+-- waiting for or receiving the world, or loading it.
+function M.isConnecting()
+    return joining or (role == "guest" and levelName() ~= MAP)
+end
+-- Cancel works until the world starts loading; loaded then it would open the
+-- host's world as a singleplayer game.
+function M.canCancel()
+    return joining or (role == "guest" and levelName() == "Empty" and not pendingLoad
+        and not (travelingSince and os.time() - travelingSince < TRAVEL_LIMIT))
 end
 
 function M.join(peer)
@@ -367,13 +430,40 @@ local function leave()
     net.send("steam", "leave")
     role, world, hostWorld, joinPeer, M.peerName, M.hostMode = nil, nil, nil, nil, nil, nil
     guestWaiting, sendState, wasInMp, onTitleSince, sentName = false, nil, false, nil, nil
+    followHost = false
     if M.onLeave then M.onLeave() end
     if rejoinPeer then
         local p = rejoinPeer
         rejoinPeer = nil
         log("ansluter igen till %s", tostring(p))
         M.join(p)
+        if joining then status("reconnecting") end
     end
+end
+
+-- Waiting to join (again) on the title screen: the game's PRESS ANY KEY is
+-- passed by itself, so the menu with the status and Cancel shows at once
+-- (user 2026-11-21). Same as the key would do: log the player in, go to the
+-- main menu state (tried on the bench).
+local lastWelcomeSkip = 0
+local function skipWelcome()
+    if os.time() - lastWelcomeSkip < 2 then return end
+    lastWelcomeSkip = os.time()
+    local gi = UEHelpers.GetGameInstance()
+    local okS, st = pcall(function() return gi:GetCurrentState():ToString() end)
+    if not (okS and st == "Welcome") then return end
+    pcall(function() gi:RequestPrimaryLocalPlayerLogin(false) end)
+    local ok, err = pcall(function() gi:GotoState(FName("MainMenu")) end)
+    log("titel: PRESS ANY KEY förbi medan vi ansluter: %s", ok and "ok" or tostring(err))
+end
+
+-- The guest stops waiting for a host (menu): the session ends here.
+function M.cancelJoin()
+    if not M.canCancel() then return end
+    log("anslutning avbruten")
+    joining, rejoinPeer, pendingLoad = false, nil, nil
+    leave()
+    M.status = ""
 end
 
 function M.tick()
@@ -382,8 +472,32 @@ function M.tick()
         sentName, lastNameSent = M.playerName, os.time()
         net.send("pname", M.playerName)
     end
+    if level ~= lastLevel then
+        log("nivå: %s -> %s", tostring(lastLevel), tostring(level))
+        lastLevel = level
+        -- Arrived: the "Loading <world>" line is not left in the menu for later.
+        if level == MAP and statusSticky then M.status, statusSticky = "", false end
+    end
     if role and level == MAP then wasInMp = true end
-    if wasInMp and level == "Empty" and not pendingLoad and not joining and not sendState then
+    if level == MAP then travelingSince = nil end
+    local traveling = (travelingSince and os.time() - travelingSince < TRAVEL_LIMIT) or os.time() < creatingUntil
+    if level == MAP then
+        moveSent = false
+    elseif role == "host" and wasInMp and not moveSent and not traveling then
+        -- Left the world: the guest follows wherever the host goes next.
+        moveSent = true
+        net.send("hostmove")
+        log("värden lämnar världen: gästen följer med")
+    end
+    if followHost and role == "guest" and level == MAP and inWorldSince and os.time() - inWorldSince > FOLLOW_AFTER then
+        followHost = false
+        log("följer värden: till titelskärmen och ansluter igen")
+        M.rejoinFromTitle()
+        status("joining")
+        pcall(function() require("props").pause() require("drops").pause() end)
+        pcall(function() UEHelpers.GetGameInstance():GotoInitialState() end)
+    end
+    if wasInMp and level == "Empty" and not pendingLoad and not joining and not sendState and not traveling then
         onTitleSince = onTitleSince or os.time()
         if os.time() - onTitleSince >= LEAVE_SECONDS then leave() end
     else
@@ -395,6 +509,7 @@ function M.tick()
         if not guardReady and pendingLoad ~= "Coop/" .. CLIENT then log("vakten svarade inte, laddar ändå") end
         local slot = pendingLoad
         pendingLoad = nil
+        if role == "host" then world = slot:match("^Coop/(.+)$") or world end
         loadSlot(slot)
     end
     if level == MAP then
@@ -403,6 +518,7 @@ function M.tick()
         inWorldSince = nil
     end
 
+    if joining and level == "Empty" then skipWelcome() end
     if joining and os.time() - lastHello >= HELLO_EVERY then
         lastHello = os.time()
         -- Repeated with every hello: coopnet may have started after the first one.
@@ -411,6 +527,9 @@ function M.tick()
     end
 
     if not (role and inWorldSince and os.time() - inWorldSince > 10) then return end
+    -- Leaving for another world (loadWorld): world already names the next one,
+    -- and a save now would write the old world's state into its file.
+    if pendingLoad then return end
     local sub = subsystem()
     if not sub then return end
     local slot = "Coop/" .. world
@@ -453,6 +572,14 @@ function M.handle(msg)
             if joinPeer:match("^%d+$") and M.onJoinedHost then M.onJoinedHost(joinPeer) end
             compareMods(msg[4], msg[3])
             status("waiting")
+        end
+        return true
+    elseif kind == "hostmove" then
+        -- Only a guest playing in a world follows; one still joining gets the
+        -- host's next world over the join it is already in.
+        if role == "guest" and not joining then
+            followHost = true
+            log("värden byter värld")
         end
         return true
     elseif kind == "pname" then
@@ -510,7 +637,6 @@ function M.handle(msg)
     elseif kind == "steam" then
         local what = msg[3]
         if what == "me" then M.me, M.code = msg[4], msg[5]
-        elseif what == "friend" then M.friends[#M.friends + 1] = { id = msg[4], name = msg[5] }
         elseif what == "clipped" then status("copied", tostring(msg[4]))
         elseif what == "clipcode" then M.join(msg[4])
         elseif what == "clipbad" then status("no_invite")

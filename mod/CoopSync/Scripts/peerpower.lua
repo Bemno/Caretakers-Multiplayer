@@ -215,8 +215,12 @@ local function makeBody(puppet)
     pcall(function() bat.RootComponent:SetSimulatePhysics(false) end)
     pcall(function() bat.RootComponent:SetMobility(2) end)
     -- Everything but the socket is hidden; the cable plugs into the socket.
-    for _, c in ipairs(FindObjects(0, "PrimitiveComponent", "", 0, 0, false) or {}) do
+    -- The battery's own components: going through every primitive in the
+    -- world stalled the game 117-134 ms each time the body was made (2026-11-21).
+    for _, e in ipairs(bat:K2_GetComponentsByClass(StaticFindObject("/Script/Engine.PrimitiveComponent")) or {}) do
         pcall(function()
+            local c = e
+            pcall(function() c = e:get() end)
             if c:GetOwner():GetAddress() == bat:GetAddress() then
                 -- The socket's mesh (SM_Socket_Electrical_Output) sits in an
                 -- unnamed StaticMeshComponent, so the mesh name counts too.

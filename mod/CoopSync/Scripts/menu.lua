@@ -142,18 +142,38 @@ local function updateEntry(add)
     end
 end
 
+local SLOTS = 10
+local worldBack             -- page the world page returns to
+local function slotOf(name)
+    local n = tonumber((name or ""):match("^[Ss]lot(%d+)$"))
+    return n and n >= 1 and n <= SLOTS and n or nil
+end
+local function firstFreeSlot()
+    local used = {}
+    for _, w in ipairs(lobby.worlds) do local n = slotOf(w.name) if n then used[n] = true end end
+    for i = 1, SLOTS do if not used[i] then return i end end
+end
+
 local function entries()
     local e = {}
     local function add(text, fn) e[#e + 1] = { text = text, fn = fn } end
     local function box(hint, max) e[#e + 1] = { box = true, text = "[box]", hint = hint, max = max } end
-    if page == "main" then
-        add(T("multiplayer"), function() page = "mp" lobby.refresh() end)
-        updateEntry(add)
+    -- Joining (also after following the host out of a world) waits until the
+    -- host answers, however long; only a way out is offered meanwhile.
+    if lobby.isConnecting() then
+        add(lobby.statusText() ~= "" and lobby.statusText() or T("joining"), false)
+        if lobby.canCancel() then add(T("cancel"), function() lobby.cancelJoin() page = "mp" end) end
         return e
     end
-    -- Servers to join come first on the multiplayer page, with a gap below
-    -- them (tested 2026-11-17); a status line follows.
+    if page == "main" then
+        add(T("multiplayer"), function() page = "mp" lobby.refresh() end)
+        return e
+    end
+    -- The update button tops the multiplayer page; servers to join follow, then
+    -- a status line. No gap below the servers: it showed as an empty button
+    -- (user 2026-11-21).
     if page == "mp" then
+        updateEntry(add)
         local joins = 0
         for _, f in ipairs(friends.list()) do
             if f.state == "ok" and friends.online(f) and f.mode == "host" then
@@ -167,7 +187,6 @@ local function entries()
             add(T("join_lan", l.world, l.name), function() lobby.join("lan:" .. addr) end)
             joins = joins + 1
         end
-        if joins > 0 then add("", false) end
     end
     local status = lobby.statusText()
     if friends.message then status = friends.message end
@@ -175,7 +194,10 @@ local function entries()
         add((lobby.modWarning and T("mods_differ", lobby.modWarning) or status), false)
     end
     if page == "mp" then
-        add(T("player_name", lobby.playerName ~= "" and lobby.playerName or "?"), function()
+        -- Just the name once one is typed; the label only while it is empty.
+        local nameLabel = lobby.playerName ~= "" and lobby.playerName
+            or (T("player_name", ""):gsub("[:：]%s*$", ""))
+        add(nameLabel, function()
             draft = lobby.playerName page = "playername"
         end)
         add(T("host"), function() page = "host" lobby.refresh() end)
@@ -188,10 +210,30 @@ local function entries()
         add(T("save_name"), function() if lobby.setPlayerName(typedName()) then page = "mp" end end)
         add(T("cancel"), go("mp"))
     elseif page == "host" then
-        add(T("load_world"), go("archive"))
-        add(T("new_world"), function() draft = os.date("%Y-%m-%d_%H%M") page = "newname" end)
+        -- Ten numbered slots like singleplayer (user 2026-11-20); a slot is the
+        -- world named Slot<n>. Older named worlds stay under Other worlds.
+        local byName, others = {}, 0
+        for _, w in ipairs(lobby.worlds) do
+            byName[w.name:lower()] = w
+            if not slotOf(w.name) then others = others + 1 end
+        end
+        for i = 1, SLOTS do
+            local name = "Slot" .. i
+            local w = byName[name:lower()]
+            if w then
+                add(T("slot", i, stamp(w.time)), function() selected, worldBack = w.name, "host" page = "world" end)
+            else
+                add(T("slot", i, T("new_world")), function() selected = name page = "newslot" end)
+            end
+        end
+        if others > 0 then add(T("other_worlds"), go("archive")) end
         add(inviteLabel(), copyInvite())
         add(T("back"), go("mp"))
+    elseif page == "newslot" then
+        local name = selected
+        add(T("host_online"), function() if lobby.newWorld(name, "online") then page = "host" end end)
+        add(T("host_lan"), function() if lobby.newWorld(name, "lan") then page = "host" end end)
+        add(T("back"), go("host"))
     elseif page == "friendlist" then
         for _, r in ipairs(friends.requests()) do
             local id = r.id
@@ -250,23 +292,32 @@ local function entries()
         end)
         add(T("cancel"), go("world"))
     elseif page == "archive" then
-        if #lobby.worlds == 0 then add(T("no_worlds"), false) end
-        for i, w in ipairs(lobby.worlds) do
-            if i > MAX_LIST * 2 then break end
-            add(w.name .. "  (" .. stamp(w.time) .. ")", function() selected = w.name page = "world" end)
+        local shown = 0
+        for _, w in ipairs(lobby.worlds) do
+            if not slotOf(w.name) and shown < MAX_LIST * 2 then
+                shown = shown + 1
+                add(w.name .. "  (" .. stamp(w.time) .. ")", function() selected, worldBack = w.name, "archive" page = "world" end)
+            end
         end
+        if shown == 0 then add(T("no_worlds"), false) end
         add(T("import"), go("import"))
         add(T("back"), go("host"))
     elseif page == "world" then
         local name = selected
         add(T("play_online", name), function() lobby.host(name, "online") end)
         add(T("play_lan", name), function() lobby.host(name, "lan") end)
-        add(T("rename"), function() draft = name page = "rename" end)
+        if not slotOf(name) then
+            local free = firstFreeSlot()
+            if free then
+                add(T("to_slot", free), function() if lobby.renameWorld(name, "Slot" .. free) then page = "host" end end)
+            end
+            add(T("rename"), function() draft = name page = "rename" end)
+        end
         add(T("delete", name), go("confirm"))
-        add(T("back"), go("archive"))
+        add(T("back"), go(worldBack or "archive"))
     elseif page == "confirm" then
         local name = selected
-        add(T("confirm_delete", name), function() lobby.deleteWorld(name) page = "archive" end)
+        add(T("confirm_delete", name), function() lobby.deleteWorld(name) page = worldBack or "archive" end)
         add(T("cancel"), go("world"))
     elseif page == "import" then
         for _, s in ipairs(lobby.spSlots) do
@@ -333,7 +384,7 @@ local function render(menu, list)
             w:RemoveFromParent()
         else
             if origVis[a] == nil then origVis[a] = w:GetVisibility() end
-            w:SetVisibility(page == "main" and origVis[a] or COLLAPSED)
+            w:SetVisibility((page == "main" and not lobby.isConnecting()) and origVis[a] or COLLAPSED)
         end
     end
     ours = {}
@@ -422,7 +473,10 @@ local function pollMouse(menu)
         -- The button's own pressed state is read inside the game, so it also works when the mouse
         -- reaches the game through ProtoInput (split screen), where coopnet sees no Windows click.
         if ours[a] then
-            local okP, pressed = pcall(function() return w.SubBtn:IsPressed() end)
+            local okP, pressed = pcall(function()
+                local b = w.SubBtn
+                return b and b:IsValid() and b:IsPressed()
+            end)
             pressed = okP and pressed or false
             if pressed and not pressedWas[a] then addClick(a, "knapp") end
             pressedWas[a] = pressed

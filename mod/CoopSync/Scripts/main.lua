@@ -1,7 +1,10 @@
 -- UE4SS 4 names a rotator's pitch "pitch" both out and in, and ignores "Pitch" (3.0.1 used
 -- "Pitch"), so since the move to UE4SS 4 every synced pitch was 0. Read and build rotators with these.
 -- PITCH_FIX = false behaves as before the fix (control run on the bench, 2026-11-19).
-PITCH_FIX = false
+-- Off from 19/11: on, the boat threw itself about when the guest took it over at the
+-- quay. That was the stowed anchors (boat.lua restartRaisedAnchors); on again 21/11
+-- after the same run with and without it gave the same tilt (11 and 10 degrees at speed).
+PITCH_FIX = true
 function RotP(r) if not PITCH_FIX then return r and r.Pitch end return r and (r.pitch or r.Pitch) end
 function Rot(p, y, r) if not PITCH_FIX then return { Pitch = p, Yaw = y, Roll = r } end return { pitch = p, Pitch = p, Yaw = y, Roll = r } end
 
@@ -632,6 +635,13 @@ local function ownBody(pawn)
             if not bodyIsPawn then log("egen pawn %s: skickar gubbens läge i stället", cls) end
         end
     end
+    -- At the wheel the boat is the pawn and the character rides mounted on it
+    -- (bMountCharacterWithVehicle): the boat's own place was sent and the other
+    -- saw the driver standing mid-deck (user 2026-11-21).
+    if bodyIsPawn and not pawnIsChar and boat.isBoat(pawn) then
+        local okD, d = pcall(function() return pawn:GetDriver() end)
+        if okD and d and d:IsValid() then return d, true end
+    end
     if bodyIsPawn then return pawn end
     local c = StaticFindObject(ownCharPath)
     if c and c:IsValid() then return c end
@@ -642,7 +652,8 @@ local function sendOwnPosition()
     local pawn = localPC().Pawn
     if not (pawn and pawn:IsValid()) then return end
     local own = pawn
-    pawn = ownBody(pawn)
+    local driver
+    pawn, driver = ownBody(pawn)
     if own ~= pawn and drone.isDrone(own) then
         local okDr, errDr = pcall(drone.send, own)
         if not okDr then log("drönare-sändfel: %s", tostring(errDr)) end
@@ -662,7 +673,7 @@ local function sendOwnPosition()
     end
     -- At the wheel the sent body is the boat, which has no mesh: the error
     -- was logged every frame (2026-11-18).
-    local isChar = pawnIsChar or not bodyIsPawn
+    local isChar = pawnIsChar or not bodyIsPawn or driver
     if isChar then
         local okN, errN = pcall(anim.send, pawn, lastPosSent)
         if not okN then log("anim-sändfel: %s", tostring(errN)) end
@@ -689,8 +700,30 @@ local worldSince
 -- just made (LAN, 2026-11-17). Positions are dropped, the rest is replayed.
 local early = {}
 local EARLY_MAX = 20000
+-- The world counts as settled once it has run calmly: at least SETTLE_MIN s in,
+-- the own pawn there, and no tick later than HITCH for CALM_SECONDS (a world
+-- still streaming in stalls the game). Never later than SETTLE_MAX, the fixed
+-- 30 s used before (2026-11-21): a fast computer gets in sooner, a slow one
+-- still waiting on streaming waits as before.
+local SETTLE_MIN, SETTLE_MAX, CALM_SECONDS, HITCH = 15, 30, 5, 0.15
+local settledAt, calmSince, lastTickAt
+local function updateSettle()
+    if settledAt then return end
+    local t = realTime()
+    if lastTickAt and t - lastTickAt > HITCH then calmSince = nil end
+    lastTickAt = t
+    calmSince = calmSince or t
+    local since = t - worldSince
+    local p = localPC().Pawn
+    local pawnOk = p ~= nil and p:IsValid()
+    if since >= SETTLE_MAX or (since >= SETTLE_MIN and pawnOk and t - calmSince >= CALM_SECONDS) then
+        settledAt = t
+        log("världen satt sig efter %.1f s (%s)", since, since >= SETTLE_MAX and "längsta väntan" or "lugnt i " .. CALM_SECONDS .. " s")
+    end
+end
+
 local function guestSettled()
-    return worldSince ~= nil and levelName() == "VoyageWorld2" and realTime() - worldSince >= 30
+    return worldSince ~= nil and settledAt ~= nil and levelName() == "VoyageWorld2"
 end
 
 local function handle(msg)
@@ -857,16 +890,25 @@ local function tick()
     timed("nät", pumpNet)
     timed("nivånamn", levelName)
     if not role then return end
+    if levelName() == "Empty" and worldSince then
+        -- Left a world (the guest follows the host to a reload or another world):
+        -- nothing of the old world carries over into the next one.
+        early = {}
+        props.reset() power.reset() drops.reset() doors.reset() prog.reset()
+    end
+    if levelName() == "Empty" then settledAt, calmSince, lastTickAt = nil, nil, nil end
     if levelName() == "Empty" then worldSince = nil posReady, posBuf = false, {} death.reset() inv.reset() build.reset() boat.reset() weather.reset() ocean.reset() swarms.reset() npc.reset() loading.reset() boxes.reset() machines.reset() repair.reset() vehicles.reset() lamp.reset() paint.reset() gear.reset() zap.reset() drone.reset() mapicons.reset() terminals.reset() peerinv.reset() peerpower.reset() hostlost.reset() return end
     worldSince = worldSince or realTime()
+    updateSettle()
     if role == "guest" and levelName() == "VoyageWorld2" then
         local since = realTime() - worldSince
         local p = localPC().Pawn
-        local ready = (since >= 36 and target ~= nil and p ~= nil and p:IsValid()) or since >= 120
+        -- Six seconds after settling (was a fixed 36 s), with the host's position in.
+        local ready = (settledAt ~= nil and realTime() - settledAt >= 6 and target ~= nil and p ~= nil and p:IsValid()) or since >= 120
         local okL, errL = timed("laddvy", loading.tick, realTime(), ready)
         if not okL then log("laddvy-fel: %s", tostring(errL)) end
     end
-    if realTime() - worldSince < 30 then return end
+    if not settledAt then return end
     timed("värdkoll", hostlost.tick, true)
     if #early > 0 then
         log("gäst: %d meddelanden från laddningen hanteras nu", #early)

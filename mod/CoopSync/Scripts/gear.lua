@@ -80,6 +80,7 @@ local function weaponEntries(pawn, out)
     local body = pawn.Mesh
     local kml = StaticFindObject(KML)
     local equipCls = StaticFindObject(EQUIP_CLASS)
+    local cableCls = StaticFindObject("/Script/Voyage.ModulesConnectCable")
     local attached = {}
     pawn:GetAttachedActors(attached, true, true)
     weaponPaths = {}
@@ -87,8 +88,8 @@ local function weaponEntries(pawn, out)
         pcall(function()
             local a = x.get and x:get() or x
             if not a:IsValid() or a.bHidden then return end
-            local cls = a:GetClass():GetFName():ToString()
-            if cls:find("Cable", 1, true) then return end
+            -- Only cables themselves: a stowed cable reel is shown like any crate.
+            if cableCls and cableCls:IsValid() and a:IsA(cableCls) then return end
             local socket = anchorSocket(a, body)
             if not socket then return end
             local isEquip = equipCls and a:IsA(equipCls)

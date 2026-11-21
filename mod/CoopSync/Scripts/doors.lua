@@ -83,4 +83,9 @@ function M.handle(msg)
     return true
 end
 
+-- A new world in the same game run; the hooks stay registered.
+function M.reset()
+    applying, pendingPos, lastSentPos, missing = false, {}, {}, {}
+end
+
 return M

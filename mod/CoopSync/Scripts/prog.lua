@@ -306,4 +306,11 @@ function M.handle(msg)
     return true
 end
 
+-- A new world in the same game run: a snapshot from the old world must not be
+-- merged into the new one (the host loading an older save got it back).
+function M.reset()
+    peer, lastSent, lastPoll = nil, nil, 0
+    vaultCheckedFor, vaultKnown, vaultPrint = nil, nil, nil
+end
+
 return M

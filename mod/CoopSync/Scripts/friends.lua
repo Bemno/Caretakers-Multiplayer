@@ -20,7 +20,6 @@ M.message = nil             -- last error for the menu (bad id)
 local active = false
 local lastAsk, lastResend = -100, -100
 local sentState
-local pendingChange = {}    -- typed text -> id it replaces
 
 local function save()
     local tmp = path .. ".tmp"
@@ -85,12 +84,6 @@ end
 -- Typed text (id, invite code, profile address) goes to coopnet to be read.
 function M.add(text)
     text = (text or ""):gsub("[|\r\n]", "")
-    net.send("steam", "resolve", text)
-end
-
-function M.changeId(id, text)
-    text = (text or ""):gsub("[|\r\n]", "")
-    pendingChange[text] = id
     net.send("steam", "resolve", text)
 end
 
@@ -256,17 +249,8 @@ function M.handle(msg)
             changed()
         end
     elseif what == "resolved" then
-        local text = msg[5] or ""
-        local old = pendingChange[text]
-        pendingChange[text] = nil
         if id == "" then M.message = T("bad_id") return true end
-        if old then
-            local name = M.entries[old] and M.entries[old].name
-            if old ~= id then M.remove(old) end
-            M.addId(id, name)
-        else
-            M.addId(id)
-        end
+        M.addId(id)
     elseif what == "name" then
         local name = msg[5] or ""
         if id == lobby.me then

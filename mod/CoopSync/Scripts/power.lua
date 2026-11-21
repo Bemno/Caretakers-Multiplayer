@@ -20,17 +20,39 @@ end
 
 -- Static level actors have the same path in both games; runtime actors (built
 -- modules, dropped items) only share the save id.
+-- The boat is a level instance whose number grows when the world is loaded
+-- again in the same run: after the guest died, every boat socket looked
+-- changed and the host unplugged all cables, mooring too (2026-11-21).
+local function stablePath(path)
+    return (path:gsub("_LevelInstance_%d+%.", "_LevelInstance_#."))
+end
+
 local function keyOf(actor)
     -- Placed in the level: the same name in both games, while the save id can
     -- be shared (three quay solar panels had one id, 2026-11-16).
     local path = pathOf(actor)
-    if path and path:find("_UAID_", 1, true) then return "p" .. path end
+    if path and path:find("_UAID_", 1, true) then return "p" .. stablePath(path) end
     local pc = actor:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
     if pc and pc:IsValid() then
         local id = pc.PersistentUniqueId
         if id and id ~= 0 then return "i" .. props.wire(tostring(id)) end
     end
-    return "p" .. pathOf(actor)
+    return "p" .. stablePath(pathOf(actor))
+end
+
+local instanceN = 1
+local function findStable(path)
+    if not path:find("_LevelInstance_#.", 1, true) then return StaticFindObject(path) end
+    local function try(n)
+        local a = StaticFindObject((path:gsub("_LevelInstance_#%.", "_LevelInstance_" .. n .. ".", 1)))
+        if a and a:IsValid() then return a end
+    end
+    local a = try(instanceN)
+    if a then return a end
+    for n = 1, 20 do
+        a = try(n)
+        if a then instanceN = n return a end
+    end
 end
 
 -- Player bodies have the same save id in both games, so a cable end in a body
@@ -52,7 +74,7 @@ local function resolve(key)
     end
     local kind, rest = key:sub(1, 1), key:sub(2)
     if kind == "p" then
-        local a = StaticFindObject(rest)
+        local a = findStable(rest)
         if a and a:IsValid() then return a end
         return nil
     end
@@ -189,7 +211,8 @@ local function stateOf(cable)
 end
 
 local function allCables()
-    local ok, found = pcall(FindObjects, 0, "ModulesConnectCable", "", 0, 0, false)
+    -- 0x30: no class defaults or templates (see boxes.scan).
+    local ok, found = pcall(FindObjects, 0, "ModulesConnectCable", "", 0, 0x30, false)
     local list = {}
     for _, c in ipairs((ok and found) or {}) do
         local okV, valid = pcall(function() return c:IsValid() and not c:GetFullName():find("Default__", 1, true) end)
@@ -429,6 +452,19 @@ local function pollCables()
                 if not inBody and not laidByUs and (now() - baselineAt < LOAD_GRACE or not (okN and near)) then
                     settling[key] = { untilT = now() + SETTLE_SECONDS, from = st }
                     log("kabel %s: inladdad (%s), skickas inte", key, st)
+                else
+                    -- Laid by us: sent as ours ("h"/"g" + id, props.markOwn).
+                    local pcN = c:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
+                    local rawId = pcN and pcN:IsValid() and tostring(pcN.PersistentUniqueId)
+                    if rawId and not copies[rawId] then
+                        props.markOwn(rawId)
+                        local okK2, key2 = pcall(keyOf, c)
+                        if okK2 and key2 ~= key then
+                            states[key] = nil
+                            key = key2
+                            states[key] = st
+                        end
+                    end
                 end
             end
             -- The boat's mooring sockets bring back a built-in line when they
@@ -555,7 +591,7 @@ local function sendCharges()
     if puppet and puppet:IsValid() then centres[#centres + 1] = puppet:K2_GetActorLocation() end
     if #centres == 0 then return end
     local character = StaticFindObject("/Script/Engine.Character")
-    local ok, found = pcall(FindObjects, 0, "VoyageModuleComponent", "", 0, 0, false)
+    local ok, found = pcall(FindObjects, 0, "VoyageModuleComponent", "", 0, 0x30, false)
     local batch = {}
     local function flush()
         if #batch > 0 then net.send("charge", table.concat(batch, ";")) batch = {} end
@@ -1217,6 +1253,18 @@ function M.handle(msg)
         return true
     end
     return false
+end
+
+-- A new world in the same game run: the first cable scan must be a fresh
+-- baseline, or every cable of the new world looked changed and was sent.
+function M.reset()
+    quietSwitch, switchQueue, copies, applyingCable, pendingCables = {}, {}, {}, {}, {}
+    cableStates, lastPoll, baselineAt, settling = nil, 0, nil, {}
+    mooringCopies, mooringPlugged, emptiedAt, returned, lastMooringCheck = {}, {}, {}, {}, 0
+    follow, givenAway, lastCharge, chargeSent = {}, {}, -100, {}
+    goneEarly, consumedOf, looseInfo, retries = {}, {}, {}, {}
+    spawnLog, skippedMooring, blockedEnds, deferred, limited = {}, {}, {}, {}, {}
+    snapshotWanted, worldSince = false, nil
 end
 
 return M

@@ -26,7 +26,8 @@ local function scan()
     if not (pawn and pawn:IsValid()) then return end
     local p = pawn:K2_GetActorLocation()
     local found = {}
-    local ok, comps = pcall(FindObjects, 0, "VoyageModuleComponent", "", 0, 0x10, false)
+    -- 0x30: no class defaults or templates (see boxes.scan); the name check stays.
+    local ok, comps = pcall(FindObjects, 0, "VoyageModuleComponent", "", 0, 0x30, false)
     for _, c in ipairs((ok and comps) or {}) do
         pcall(function()
             if not c:IsValid() then return end

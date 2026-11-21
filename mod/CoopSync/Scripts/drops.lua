@@ -77,16 +77,44 @@ local function pathOf(obj)
     return obj:GetFullName():match("%S+%s+(%S+)")
 end
 
+-- A portable module (petrol tank, battery) dropped from the inventory is a module
+-- actor, not a dynamic mesh: it never reached the other game, so carrying it and
+-- its level went nowhere (2026-11-21).
+local MODULE_CLASS = "/Script/Voyage.VoyageModuleComponent"
+local function isModule(actor)
+    local m = actor:GetComponentByClass(StaticFindObject(MODULE_CLASS))
+    return m ~= nil and m:IsValid()
+end
+
+-- Built modules sit in a socket or stand still; a dropped one falls free (or was
+-- frozen here on a boat this game only follows).
+local function looseModule(actor, frozen)
+    local root = actor.RootComponent
+    local pa = root:GetAttachParent()
+    return not (pa and pa:IsValid()) and (frozen or root:IsSimulatingPhysics(FName("None")))
+end
+
 -- Kept minimal: it runs for every actor that begins play. Only the path is
 -- queued: a UObject kept from a hook until a later tick crashed UE4SS when Lua
 -- collected it.
+-- After a world change the hook is still registered while the next world
+-- loads; what begins play then is the save's, never a drop. Taken for drops,
+-- the host sent 5 carbon fibre from the reloaded world and the guest made them
+-- a second time (2026-11-21).
+local loaded, held = false, false
+function M.pause() loaded, held = false, true end
 local function onBeginPlay(ctx)
-    if not armed then return end
+    if not armed or not loaded then return end
     local actor = ctx:get()
     -- Test bench spies get every actor: a second BeginPlay hook never fired.
     if M.spy then M.spy(pathOf(actor)) end
-    if not isDynamic(actor) then return end
-    local entry = { path = pathOf(actor) }
+    local module = false
+    if not isDynamic(actor) then
+        local okM, m = pcall(isModule, actor)
+        if not (okM and m) then return end
+        module = true
+    end
+    local entry = { path = pathOf(actor), module = module }
     if now() - lastCrafting < 1.5 then
         entry.crafted = now()
         queue[#queue + 1] = entry
@@ -254,7 +282,7 @@ local function examine(entry)
     if props.dropQuietUntil and os.time() < props.dropQuietUntil then return end
     local actor = StaticFindObject(entry.path)
     entry.t = entry.t or now()
-    if not (actor and actor:IsValid() and isDynamic(actor)) then return end
+    if not (actor and actor:IsValid() and (entry.module or isDynamic(actor))) then return end
     local item = itemOf(actor)
     -- An egg sack spawned for the host's never gets CurrentVisualizeItem, so
     -- it was never linked and the guest removed it as its own (2026-11-17).
@@ -274,6 +302,10 @@ local function examine(entry)
     end
     local loc = actor:K2_GetActorLocation()
     if claimForPeer(actor, item, loc) then return end
+    if entry.module then
+        local okL, loose = pcall(looseModule, actor, entry.frozen ~= nil)
+        if not (okL and loose) then return end
+    end
     for _, p in ipairs(pendingPeer) do
         if dist(loc, p.loc) < MATCH_RADIUS then
             log("okänd aktör vid väntande släpp, skickas inte: %s (%s)", actor:GetFullName(), pathOf(item))
@@ -309,10 +341,12 @@ local function examine(entry)
     -- its copy fall and streams it back (claimForPeer); welded at the outlet in both
     -- games, grinder output hung in the air there (2026-11-19).
     local kind = entry.frozen and (mine and "m" or "f") or ""
-    net.send("drop", id, pathOf(item), f1(loc.X), f1(loc.Y), f1(loc.Z), f1(RotP(r)), f1(r.Yaw), f1(r.Roll), countOf(actor, item),
-        kind, bkey, rel and f1(rel.X) or "", rel and f1(rel.Y) or "", rel and f1(rel.Z) or "")
     props.sentDrops[id] = true
     pcall(props.registerOwn, id, ownPc)
+    local rawId = id
+    id = props.wire(id)
+    net.send("drop", id, pathOf(item), f1(loc.X), f1(loc.Y), f1(loc.Z), f1(RotP(r)), f1(r.Yaw), f1(r.Roll), countOf(actor, item),
+        kind, bkey, rel and f1(rel.X) or "", rel and f1(rel.Y) or "", rel and f1(rel.Z) or "")
     -- A frozen drop is not streamed: the host's copy lands and the guest's follows.
     -- On a boat this game moves, it is watched like a let-go crate: streamed
     -- until it rests, then welded there in both games.
@@ -328,7 +362,7 @@ local function examine(entry)
     else
         following[#following + 1] = { comp = actor.RootComponent, id = id, untilT = now() + FOLLOW_SECONDS, still = 0 }
     end
-    log("släppte %s (id %s, %.0f cm från mig, antal %d%s)", pathOf(item), id, d, countOf(actor, item), entry.frozen and ", fryst på båten" or "")
+    log("släppte %s (id %s = %s, %.0f cm från mig, antal %d%s)", pathOf(item), rawId, id, d, countOf(actor, item), entry.frozen and ", fryst på båten" or "")
 end
 
 function M.init(netModule, logFn, localPCFn, nowFn, propsModule)
@@ -350,6 +384,7 @@ function M.tick()
     worldSince = worldSince or now()
     if now() - worldSince < ARM_AFTER then return end
     arm()
+    if not loaded and not held then loaded, queue = true, {} end
     noteCrafting()
     local q = queue
     queue = {}
@@ -430,6 +465,13 @@ function M.handle(msg)
     if msg[1] ~= "drop" then return false end
     spawnForPeer(msg)
     return true
+end
+
+-- A new world in the same game run; the hooks stay registered.
+function M.reset()
+    loaded, held = false, false
+    worldSince, lastCrafting, lastMachineDrop = nil, -100, -100
+    queue, pendingPeer, following, waiting, machineQueue = {}, {}, {}, {}, {}
 end
 
 return M

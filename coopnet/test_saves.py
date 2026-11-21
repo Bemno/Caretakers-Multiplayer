@@ -167,3 +167,21 @@ def test_leftover_session_moves_worlds_out_and_old_vault_along(tmp_path):
     assert (sp / f"{SID}_1.sav").read_bytes() == b"sp1"
     assert not (tmp_path / "SaveGames" / "Coop").exists()
     assert (tmp_path / saves.STORE / "a.sav").exists()
+
+
+def test_move_all_skips_a_file_the_other_coopnet_moved(tmp_path, monkeypatch):
+    src, dst = tmp_path / "src", tmp_path / "dst"
+    src.mkdir()
+    (src / "a.sav").write_text("a")
+    (src / "b.sav").write_text("b")
+    real = os.replace
+
+    def racing(a, b):
+        if a.endswith("a.sav"):
+            os.remove(a)
+            raise FileNotFoundError(a)
+        real(a, b)
+
+    monkeypatch.setattr(saves.os, "replace", racing)
+    saves._move_all(str(src), str(dst))
+    assert (dst / "b.sav").read_text() == "b"

@@ -453,6 +453,7 @@ local function sendBuilt(f, a, id)
     local cls = pathOf(a:GetClass())
     local v, r = a:K2_GetActorLocation(), a:K2_GetActorRotation()
     if f.item then M.learn(f.item, cls) end
+    props.markOwn(id)
     net.send("built", f.key, cls, string.format("%.1f", v.X), string.format("%.1f", v.Y), string.format("%.1f", v.Z),
         string.format("%.2f", RotP(r) or 0), string.format("%.2f", r.Yaw or 0), string.format("%.2f", r.Roll or 0),
         props.wire(id), f.item or "", mountOf(a))
@@ -528,6 +529,8 @@ local function poll()
                 elseif not f.item then
                     log("bygge: ny blueprint %s utan föremål", path)
                 else
+                    local rawId = idOf(fab)
+                    if rawId then props.markOwn(rawId) f.key = props.wire(rawId) end
                     net.send("bp", f.key, f.item, string.format("%.1f", f.loc.X), string.format("%.1f", f.loc.Y),
                         string.format("%.1f", f.loc.Z), string.format("%.2f", f.rot.Yaw), table.unpack(f.mount))
                     log("bygge: ny blueprint %s (%s, id %s)", path, f.item, f.key)

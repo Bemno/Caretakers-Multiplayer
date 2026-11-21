@@ -884,10 +884,13 @@ local SOFT_SECONDS, SOFT_SPEED, SOFT_SPIN = 5, 30, 3
 local soft = {}             -- key -> time the cap ends
 
 -- Anchors (user 2026-11-19): up while any mooring line is in and never set again
--- meanwhile, kept up 30 s after the last line is let go, and up once the boat is
--- under way. Done in the game that moves the boat; the other mirrors its anchors.
-local ANCHOR_FREE_AFTER, ANCHOR_THROTTLE, ANCHOR_RETRY = 30, 0.05, 2
-local anchorsFreeAt, anchorLiftAt = {}, {}
+-- meanwhile, and up when the boat is given throttle. Done in the game that moves
+-- the boat; the other mirrors its anchors. Kept up 30 s after the release too until
+-- 2026-11-21, against anchors that fell by themselves (the stowed ones, now started
+-- again at rest): it lifted every press of the anchor button in that time. The
+-- throttle lifts them only as it is given, so an anchor dropped under way stays down.
+local ANCHOR_THROTTLE, ANCHOR_RETRY = 0.05, 2
+local anchorLiftAt, throttleOn = {}, {}
 
 -- Each anchor module has its own state (VoyageAnchor.AnchorDropped): one dropped
 -- at the module left the boat's AnchorsDropped false, and the rule never saw it.
@@ -920,20 +923,57 @@ local function anchorRules(key, actor)
     if not okS then log("båt %s: ankarstuvning: %s", key, tostring(errS)) end
     if #M.mooringCables > 0 then
         keepAnchorsUp(key, actor, "förtöjd")
-    elseif anchorsFreeAt[key] and now() < anchorsFreeAt[key] then
-        keepAnchorsUp(key, actor, "nyss förtöjd")
-    elseif math.abs(control(actor, "GetThrottleActual")) > ANCHOR_THROTTLE then
-        keepAnchorsUp(key, actor, "körs")
     end
+    local on = math.abs(control(actor, "GetThrottleActual")) > ANCHOR_THROTTLE
+    if on and not throttleOn[key] and #M.mooringCables == 0 then
+        anchorLiftAt[key] = nil
+        keepAnchorsUp(key, actor, "gas")
+    end
+    throttleOn[key] = on
+end
+
+-- While moored the raised anchors are fastened to their spools with physics off.
+-- At release the game gave them physics again while still fastened, and they flew
+-- off at 40-100 m/s on their cables: the hull was jerked 5-30 m/s in random
+-- directions and rolled to 28 degrees (bench 2026-11-21, 38 jolts, then 2). They
+-- are loosened and started again at rest under the spool, once per release.
+local restartAnchors = {}   -- key -> true until the first frame after the release
+local function restartRaisedAnchors(key)
+    local kml = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
+    local n = 0
+    for _, part in ipairs(anchorParts[key] or {}) do
+        local a, r = StaticFindObject(part.anchor), StaticFindObject(part.root)
+        if a and a:IsValid() and r and r:IsValid() and not anchorDown(part) then
+            local pa = a:GetAttachParent()
+            if pa and pa:IsValid() and pa:GetAddress() == r:GetAddress() then a:K2_DetachFromComponent(1, 1, 1, false) end
+            a:SetSimulatePhysics(false)
+            a:K2_SetWorldTransform(kml:ComposeTransforms(ANCHOR_IN_ROOT, r:K2_GetComponentToWorld()), false, {}, true)
+            local cable = part.cable and StaticFindObject(part.cable)
+            if cable and cable:IsValid() then pcall(function() cable:Reset() end) end
+            a:SetSimulatePhysics(true)
+            a:SetPhysicsLinearVelocity(ZERO, false, FName("None"))
+            a:SetPhysicsAngularVelocityInDegrees(ZERO, false, FName("None"))
+            n = n + 1
+        end
+    end
+    return n
 end
 
 local function softRelease()
     for key, untilT in pairs(soft) do
         local actor = boats[key]
-        local b = actor and actor:IsValid() and now() < untilT and body(actor)
-        if not b then
+        -- body() is throttled while the hull does not simulate, so right after the
+        -- release it came back nil and the cap was dropped at once (2026-11-21).
+        local live = actor and actor:IsValid() and now() < untilT
+        local b = live and body(actor)
+        if not live then
             soft[key] = nil
-        else
+        elseif restartAnchors[key] then
+            restartAnchors[key] = nil
+            local okA, nA = pcall(restartRaisedAnchors, key)
+            log("båt %s: uppdragna ankare lossade och i vila under spolen: %s", key, tostring(nA))
+        end
+        if b then
             local v = b:GetPhysicsLinearVelocity(FName("None"))
             local s = math.sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z)
             if s > SOFT_SPEED then
@@ -960,19 +1000,23 @@ local function updateHold(key, actor, driving)
     -- A line moved to another bollard leaves the boat without lines for a moment; let
     -- go and taken again, the hull got physics back each time and was knocked (2026-11-19).
     local h0 = hold[key]
-    if h0 and not driving and not M.native and not M.moored then
+    if h0 and not M.native and not M.moored then
         h0.zeroSince = h0.zeroSince or now()
         if now() - h0.zeroSince < RELEASE_GRACE then return end
     elseif h0 then
         h0.zeroSince = nil
     end
-    if driving or not M.moored or M.native then
+    -- Driving does not let go (user 2026-11-21): in singleplayer the boat stays
+    -- put while a line is in. Released, the hull got physics against taut lines
+    -- and was thrown about (12 m/s, 27 degrees, 1.3 m too deep). Only when every
+    -- line is out does the boat go, driven or not.
+    if not M.moored or M.native then
         if hold[key] then
             hold[key] = nil
             setHullPhysics(key, actor, true)
             stillBody(actor)
             soft[key] = now() + SOFT_SECONDS
-            anchorsFreeAt[key] = now() + ANCHOR_FREE_AFTER
+            restartAnchors[key] = true
             log("båt %s: förtöjning släppt, vågorna tar båten igen (farten begränsas %d s)", key, SOFT_SECONDS)
         end
         local r = root:K2_GetComponentRotation()
@@ -1006,6 +1050,9 @@ local function updateHold(key, actor, driving)
         log("båt %s: förtöjd, höjd %.0f och lutning %.1f/%.1f hålls (nu %.0f, %.1f/%.1f)", key, h.z, h.pitch, h.roll,
             l.Z, RotP(r) or 0, r.Roll or 0)
     end
+    -- Taken over at the quay the hull search was still throttled, the hull kept
+    -- simulating against the quay and lost health in that game only (2026-11-21).
+    if not hulls[key] then setHullPhysics(key, actor, false, true) end
     local count = #M.mooringCables
     if count ~= h.lines then
         if count >= 2 and h.lines < 2 then h.twoSince = now() end
@@ -1095,11 +1142,6 @@ end
 -- cost several game calls.
 local tickMyKey
 
-function M.reset()
-    lastPlaced, tickMyKey = {}, nil
-    movementOff, clockOffset, catchup, orderedBoats, hold, rest, hulls = {}, {}, {}, {}, {}, {}, {}
-    boats, lastScan, remote, peerAuthority, described, lastPawnClass, bodies, bodySearch, lastSent = {}, -100, {}, {}, {}, nil, {}, {}, {}
-end
 
 
 -- Following runs about 60 times a second, extrapolating between the 20 Hz
@@ -1453,14 +1495,32 @@ function M.tick()
     for key in pairs(boats) do if key:sub(1, 2) == "id" and M.peerControls(key) then anyPeer = true end end
     if anyPeer then pcall(applyControls) else pcall(sendControls) end
     local myKey, myBoat = drivenKey()
+    -- One at the wheel (user 2026-11-21): stepping in while the other drives
+    -- steps straight out again.
+    if myKey and peerAuthority[myKey] ~= false then
+        local r = remote[myKey]
+        if r and r.driving and now() - r.t < 1.0 then
+            local ok = pcall(function() myBoat:OnExitVehicle() end)
+            log("båt %s: den andra kör redan, kliver ur (%s)", myKey, ok and "ok" or "fel")
+            myKey, myBoat = nil, nil
+        end
+    end
     tickMyKey = myKey
     if myKey and not boats[myKey] then boats[myKey] = myBoat end
     for key, actor in pairs(boats) do
         if actor:IsValid() then
             if key == myKey then
                 if peerAuthority[key] ~= false then
-                    setHullPhysics(key, actor, true)
-                    inheritMotion(key, actor)
+                    -- A moored boat stays held (hull physics off) when someone takes the wheel.
+                    if not hold[key] then
+                        setHullPhysics(key, actor, true)
+                        inheritMotion(key, actor)
+                        -- Left without physics the raised anchors stood still in the world
+                        -- and their cables swung the boat in ever faster circles until the
+                        -- game hung (taking over after the other released the lines, 2026-11-21).
+                        local n = restartRaisedAnchors(key)
+                        if n > 0 then log("båt %s: övertagen, %d uppdragna ankare i vila under spolen", key, n) end
+                    end
                     log("båt %s: jag kör, jag styr (gas %.3f roder %.3f)", key,
                         control(actor, "GetThrottleActual"), control(actor, "GetSteeringActual"))
                     local r = remote[key]
@@ -1517,6 +1577,7 @@ function M.claim(why)
                 peerAuthority[key] = false
                 setHullPhysics(key, actor, true)
                 inheritMotion(key, actor)
+                if #M.mooringCables == 0 then restartRaisedAnchors(key) end
                 net.send("bclaim", key)
                 sendState(key, actor, false)
                 log("båt %s: %s, jag styr nu", key, why)
@@ -1568,6 +1629,18 @@ function M.handle(msg)
         anchorsSeen = prev and prev.anchorsSeen, anchorsAt = prev and prev.anchorsAt, anchorsLogged = prev and prev.anchorsLogged,
     }
     return true
+end
+
+-- A new world in the same game run (host reload, guest following). Defined
+-- last so every per-world table above is in scope: the anchors of the old
+-- world were kept after a reload, and the host's boat tick took 140 ms
+-- from then on (2026-11-21).
+function M.reset()
+    lastPlaced, tickMyKey = {}, nil
+    movementOff, clockOffset, catchup, orderedBoats, hold, rest, hulls = {}, {}, {}, {}, {}, {}, {}
+    boats, lastScan, remote, peerAuthority, described, lastPawnClass, bodies, bodySearch, lastSent = {}, -100, {}, {}, {}, nil, {}, {}, {}
+    anchorParts, soft, throttleOn, anchorLiftAt, lastSet, trapLast, restartAnchors = {}, {}, {}, {}, {}, {}, {}
+    wantControls, lastControls, lastControlSend, orderedPawn, lastRel = {}, {}, 0, nil, nil
 end
 
 return M

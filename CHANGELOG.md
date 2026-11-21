@@ -1,5 +1,45 @@
 # Changelog
 
+## 0.2.12 — 2026-11-21
+
+A big round of fixes for the boat, menus and the second player, tested together over a full evening. The boat now behaves for both players when mooring, releasing and changing driver, and the world menus work like singleplayer.
+
+- Boat: releasing the mooring lines no longer makes the boat jump around, and the anchor button works right after releasing
+- Boat: no more spinning and game freeze when the other player takes the wheel after the lines were released
+- Boat: only one player can be at the wheel at a time
+- Boat: no longer loses health at the quay when the other player takes over
+- Boat: no more wobbling when the second player drives, and tilt forward/back is shown for both
+- Boat: the driver is now seen standing at the wheel by the other player
+- Boat: driving with a mooring line still in keeps the boat at the quay, like singleplayer
+- Cables and mooring no longer come loose when the second player dies and respawns
+- Swarm creatures no longer die from a single hit by the second player; kills by the second player count for both
+- Egg sacks hit by the second player now hatch creatures for both
+- Portable modules (like the petrol tank) dropped from the backpack now show up for the other player, and their fill level follows when carried and dropped
+- Menus: Load world in the pause menu lists slots 1-10 and the other player follows; starting a new world no longer kicks the host out; empty slots on the Host page say "New world"
+- Joining: a waiting screen with progress and a Cancel button instead of PRESS ANY KEY, and the second player gets in faster
+- Less lag: menus no longer search the whole world every frame
+- Fixed a crash in the helper when two copies started at the same time
+
+## 0.2.11 — 2026-11-21
+
+A big round of fixes for the boat, menus and the second player, tested together over a full evening. The boat now behaves for both players when mooring, releasing and changing driver, and the world menus work like singleplayer.
+
+- Boat: releasing the mooring lines no longer makes the boat jump around, and the anchor button works right after releasing
+- Boat: no more spinning and game freeze when the other player takes the wheel after the lines were released
+- Boat: only one player can be at the wheel at a time
+- Boat: no longer loses health at the quay when the other player takes over
+- Boat: no more wobbling when the second player drives, and tilt forward/back is shown for both
+- Boat: the driver is now seen standing at the wheel by the other player
+- Boat: driving with a mooring line still in keeps the boat at the quay, like singleplayer
+- Cables and mooring no longer come loose when the second player dies and respawns
+- Swarm creatures no longer die from a single hit by the second player; kills by the second player count for both
+- Egg sacks hit by the second player now hatch creatures for both
+- Portable modules (like the petrol tank) dropped from the backpack now show up for the other player, and their fill level follows when carried and dropped
+- Menus: Load world in the pause menu lists slots 1-10 and the other player follows; starting a new world no longer kicks the host out; empty slots on the Host page say "New world"
+- Joining: a waiting screen with progress and a Cancel button instead of PRESS ANY KEY, and the second player gets in faster
+- Less lag: menus no longer search the whole world every frame
+- Fixed a crash in the helper when two copies started at the same time
+
 ## 0.2.10 — 2026-11-21
 
 Bug fix: the boat no longer gets stuck after it has been moored.
