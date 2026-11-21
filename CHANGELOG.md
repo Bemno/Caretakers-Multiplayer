@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.13 — 2026-11-21
+
+Hotfix for 0.2.12: flying creatures were copied between the games and multiplied, and the second player lagged badly when arriving in a new area.
+
+- Fixed: flying creatures (and other creatures near a player) were treated as dropped modules and multiplied between the games
+- Fixed: the second player lagged heavily when many items arrived at once, for example when reaching a new area
+
 ## 0.2.12 — 2026-11-21
 
 A big round of fixes for the boat, menus and the second player, tested together over a full evening. The boat now behaves for both players when mooring, releasing and changing driver, and the world menus work like singleplayer.

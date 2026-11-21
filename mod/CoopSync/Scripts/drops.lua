@@ -80,8 +80,14 @@ end
 -- A portable module (petrol tank, battery) dropped from the inventory is a module
 -- actor, not a dynamic mesh: it never reached the other game, so carrying it and
 -- its level went nowhere (2026-11-21).
+-- Only module actors by class name: flying Angels carry a module component too,
+-- were sent as drops and multiplied between the games (0.2.12, 2026-11-21). The
+-- name is checked first, as every actor streamed into a new area passes here.
 local MODULE_CLASS = "/Script/Voyage.VoyageModuleComponent"
+local PAWN = "/Script/Engine.Pawn"
 local function isModule(actor)
+    if not actor:GetClass():GetFName():ToString():find("^BP_Module_") then return false end
+    if actor:IsA(StaticFindObject(PAWN)) then return false end
     local m = actor:GetComponentByClass(StaticFindObject(MODULE_CLASS))
     return m ~= nil and m:IsValid()
 end

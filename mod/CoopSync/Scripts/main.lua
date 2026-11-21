@@ -814,7 +814,13 @@ local function pumpNet(fromFrame)
     -- the next: a burst of messages took 51 ms in one tick (2026-11-17).
     for i, msg in ipairs(msgs) do
         if not fromFrame and i > 1 and (os.clock() - c0) * 1000 > NET_BUDGET then
-            for j = #msgs, i, -1 do table.insert(backlog, 1, msgs[j]) end
+            -- Put back in one pass: inserted one by one at the front, a backlog of
+            -- thousands (loose items of a new area) cost 300 ms a tick and never
+            -- drained, only for the guest (2026-11-21).
+            local rest = {}
+            for j = i, #msgs do rest[#rest + 1] = msgs[j] end
+            for _, m in ipairs(backlog) do rest[#rest + 1] = m end
+            backlog = rest
             break
         end
         local c1 = os.clock()
