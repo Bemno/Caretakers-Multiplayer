@@ -361,6 +361,16 @@ local function control(actor, fn)
     return (ok and type(v) == "number") and v or 0
 end
 
+-- Between pull steps the held boat glides from the last pose to the new one, one step
+-- behind; put at each step it moved in jerks five times a second. The other game gets
+-- the same glided pose: sent the step target, its boat jumped at each step (2026-11-22).
+local PULL_STEP = 0.2
+local function heldPose(h)
+    if not (h.px and h.pt and h.x) then return h.x, h.y, h.yaw end
+    local f = math.min(1, (now() - h.pt) / PULL_STEP)
+    return h.px + (h.x - h.px) * f, h.py + (h.y - h.py) * f, h.pyaw + wrap(h.yaw - h.pyaw) * f
+end
+
 local function sendState(key, actor, driving)
     local root = body(actor) or actor.RootComponent
     local l = root:K2_GetComponentLocation()
@@ -370,8 +380,9 @@ local function sendState(key, actor, driving)
     -- other game, whose boat shook while this one lay still (2026-11-18).
     local h = hold[key]
     if h then
-        l = { X = h.x or l.X, Y = h.y or l.Y, Z = h.z }
-        r = Rot(h.pitch, h.yaw or r.Yaw, h.roll)
+        local x, y, yaw = heldPose(h)
+        l = { X = x or l.X, Y = y or l.Y, Z = h.z }
+        r = Rot(h.pitch, yaw or r.Yaw, h.roll)
     end
     -- The driven boat once jumped 90° to the left (2026-11-16); a big step in
     -- heading between two sends is logged with its time.
@@ -742,8 +753,11 @@ local REST_TAU = 3
 -- The game's own lines in singleplayer pull 12.7 m in 90 s (14 cm/s); the user
 -- wanted it faster (28 felt the same, 2026-11-19).
 local PULL_SPEED = 50
--- Long enough to reach the quay and swing in straight; it stops by itself when it lies against it.
-local TWO_LINE_SECONDS = 30
+-- With two lines the boat is drawn until it has lain still LOCK_STILL s, then locked
+-- (user 2026-11-22: locked once it no longer moves). A fixed 30 s before; sliding 15 m
+-- along the quay took 28. TWO_LINE_SECONDS is only the outer limit.
+local TWO_LINE_SECONDS = 120
+local LOCK_STILL = 3
 local RELEASE_GRACE = 2
 -- A line pulls until the hull reaches the quay, as in singleplayer, whatever the game
 -- has reeled in: it reels slower than the mod pulls, the line went slack after 6 s and
@@ -762,6 +776,7 @@ M.mooringCables = {}
 -- traced, and a corner went into the quay and was thrown out at release.
 local MAX_TURN = 3          -- degrees per second
 local QUAY_CLEAR = 60       -- cm kept between hull and quay
+local QUAY_BACKOFF = 15     -- cm/s off the quay while a line draws the boat along it
 local HULL_POINTS = {}
 for _, x in ipairs({ -2170, -1900, -1600, -1300, -950, -600, -250, 100, 450, 800, 1150, 1500, 1850, 2200, 2480 }) do
     HULL_POINTS[#HULL_POINTS + 1] = { x = x, y = 784, nx = 0, ny = 1 }
@@ -808,9 +823,26 @@ local function turnAbout(lines, px, py)
     return math.max(-lim, math.min(lim, w / #lines))
 end
 
+-- The boat's own parts are separate actors in its level instance: the stern face's
+-- trace hit the rudder, and the boat could never move astern along the quay (user
+-- 2026-11-22, lines put farther aft did not draw it). Things fastened to the boat
+-- (the puppet, welded crates) are not the quay either.
+local function hitsOwnBoat(actor, o, ownPrefix)
+    local isOwn = false
+    pcall(function()
+        local c = (o.OutHit or o).Component:get()
+        if c:GetFullName():find(ownPrefix, 1, true) then isOwn = true return end
+        local owner = c:GetOwner()
+        local parent = owner and owner:IsValid() and owner:GetAttachParentActor()
+        if parent and parent:IsValid() and parent:GetAddress() == actor:GetAddress() then isOwn = true end
+    end)
+    return isOwn
+end
+
 -- Hull points that would reach the quay with this motion (v of the root, w rad/s)
 -- over dt; skipNear: a pivot whose neighbours are not tested.
 local function blockedPoints(actor, cx, cy, yaw, vx, vy, w, dt, skipNear)
+    local ownPrefix = actor:GetFName():ToString() .. "LevelInstance"
     local ksl = StaticFindObject("/Script/Engine.Default__KismetSystemLibrary")
     local kml = StaticFindObject("/Script/Engine.Default__KismetMathLibrary")
     local tf = actor:GetTransform()
@@ -828,10 +860,11 @@ local function blockedPoints(actor, cx, cy, yaw, vx, vy, w, dt, skipNear)
             for _, hz in ipairs(HULL_HEIGHTS) do
                 local from = kml:TransformLocation(tf, { X = p.x, Y = p.y, Z = hz })
                 local to = { X = from.X + pvx / sp * len, Y = from.Y + pvy / sp * len, Z = from.Z }
+                local o = {}
                 local ok, hit = pcall(function()
-                    return ksl:LineTraceSingle(actor, from, to, 0, false, {}, 0, {}, true, traceColor, traceColor, 0)
+                    return ksl:LineTraceSingle(actor, from, to, 0, false, {}, 0, o, true, traceColor, traceColor, 0)
                 end)
-                if ok and hit == true then
+                if ok and hit == true and not hitsOwnBoat(actor, o, ownPrefix) then
                     out[#out + 1] = { x = wp.X, y = wp.Y, px = p.x, py = p.y, nx = nx, ny = ny }
                     break
                 end
@@ -861,10 +894,30 @@ local function pullStep(actor, h, dt)
     if math.abs(along) < 2 then tx, ty = 0, 0 end
     local wp = turnAbout(lines, p.x, p.y)
     if math.abs(wp) < math.rad(0.05) then wp = 0 end
+    -- Swung in flat against the quay (user 2026-11-22): with the bow on the quay and
+    -- the stern line pulling, the boat lay at 45 degrees ("ligger an vid 1150/784"),
+    -- since the lines' own turn about the touching point was blocked. Turn about it
+    -- the way that brings the far end of the touching side toward the quay, whatever
+    -- the lines pull, until that end touches too.
+    local farX = p.px > 150 and -2170 or 2480
+    local q = StaticFindObject("/Script/Engine.Default__KismetMathLibrary"):TransformLocation(actor:GetTransform(),
+        { X = farX, Y = p.py, Z = 0 })
+    local rx, ry = q.X - p.x, q.Y - p.y
+    local toQuay = -ry * p.nx + rx * p.ny
+    -- Only for a point on a side: touching with the bow or stern face, no side lies to the quay yet.
+    local bx, by = 0, 0
+    if tx ~= 0 or ty ~= 0 then bx, by = tx - p.nx * QUAY_BACKOFF, ty - p.ny * QUAY_BACKOFF end
+    local wa = math.abs(p.py) > 780 and (toQuay >= 0 and 1 or -1) * math.rad(MAX_TURN) or 0
     local tries = {
+        { wa, tx, ty, "glider och vrids in" },
+        { wa, 0, 0, "vrids in" },
         { wp, tx, ty, "glider och vrider" },
         { 0, tx, ty, "glider" },
         { wp, 0, 0, "vrider" },
+        -- A line put farther along the quay did not move the boat (user 2026-11-22): the
+        -- hull lay within QUAY_CLEAR of the quay all along, so sliding was blocked too. It
+        -- slides off the quay a little while the line draws it along.
+        { 0, bx, by, "glider ut längs kajen" },
     }
     for _, t in ipairs(tries) do
         local tw, sx, sy, what = t[1], t[2], t[3], t[4]
@@ -880,7 +933,10 @@ end
 
 -- After the hold lets go the hull gets physics back; a hull left touching the
 -- quay was thrown out (2026-11-19). Its speed is capped for a few seconds.
-local SOFT_SECONDS, SOFT_SPEED, SOFT_SPIN = 5, 30, 3
+-- The cap rises from SOFT_SPEED/SOFT_SPIN to the _END values over SOFT_SECONDS, so the
+-- boat goes off slowly instead of jumping once the cap ended (user 2026-11-22).
+local SOFT_SECONDS, SOFT_SPEED, SOFT_SPIN = 8, 30, 3
+local SOFT_SPEED_END, SOFT_SPIN_END = 150, 10
 local soft = {}             -- key -> time the cap ends
 
 -- Anchors (user 2026-11-19): up while any mooring line is in and never set again
@@ -968,26 +1024,51 @@ local function softRelease()
         local b = live and body(actor)
         if not live then
             soft[key] = nil
-        elseif restartAnchors[key] then
+        elseif restartAnchors[key] and not M.moored then
             restartAnchors[key] = nil
             local okA, nA = pcall(restartRaisedAnchors, key)
             log("båt %s: uppdragna ankare lossade och i vila under spolen: %s", key, tostring(nA))
         end
         if b then
+            local f = math.max(0, math.min(1, 1 - (untilT - now()) / SOFT_SECONDS))
+            local capV = SOFT_SPEED + (SOFT_SPEED_END - SOFT_SPEED) * f
+            local capW = SOFT_SPIN + (SOFT_SPIN_END - SOFT_SPIN) * f
             local v = b:GetPhysicsLinearVelocity(FName("None"))
             local s = math.sqrt(v.X * v.X + v.Y * v.Y + v.Z * v.Z)
-            if s > SOFT_SPEED then
-                local k = SOFT_SPEED / s
+            if s > capV then
+                local k = capV / s
                 b:SetPhysicsLinearVelocity({ X = v.X * k, Y = v.Y * k, Z = v.Z * k }, false, FName("None"))
             end
             local a = b:GetPhysicsAngularVelocityInDegrees(FName("None"))
             local sa = math.sqrt(a.X * a.X + a.Y * a.Y + a.Z * a.Z)
-            if sa > SOFT_SPIN then
-                local k = SOFT_SPIN / sa
+            if sa > capW then
+                local k = capW / sa
                 b:SetPhysicsAngularVelocityInDegrees({ X = a.X * k, Y = a.Y * k, Z = a.Z * k }, false, FName("None"))
             end
         end
     end
+end
+
+-- here: taken over from the other game, which held the boat at exactly this pose;
+-- the resting height kept from before is stale then.
+local function startHold(key, actor, here)
+    local root = actor.RootComponent
+    local l = root:K2_GetComponentLocation()
+    local s = not here and rest[key]
+    local r = root:K2_GetComponentRotation()
+    -- Held upright: the average tilt taken while the boat bobbed (during
+    -- loading) left it standing askew (2026-11-18).
+    local h = { z = s and s.z or l.Z, pitch = 0, roll = 0, x = l.X, y = l.Y, yaw = r.Yaw, lines = 0 }
+    hold[key] = h
+    setOwnMovement(key, actor, true)
+    -- Off while moored, as on 18/11: with it on, the reeling lines built up force
+    -- against the hull put back every frame, it knocked on the quay and lost health,
+    -- and let go it was thrown off (2026-11-19). Back on at release.
+    stillBody(actor)
+    setHullPhysics(key, actor, false, true)
+    log("båt %s: förtöjd, höjd %.0f och lutning %.1f/%.1f hålls (nu %.0f, %.1f/%.1f)", key, h.z, h.pitch, h.roll,
+        l.Z, RotP(r) or 0, r.Roll or 0)
+    return h
 end
 
 local function updateHold(key, actor, driving)
@@ -1014,6 +1095,9 @@ local function updateHold(key, actor, driving)
         if hold[key] then
             hold[key] = nil
             setHullPhysics(key, actor, true)
+            -- The hull search waits 2 s while the hull does not simulate: found only then,
+            -- the cap missed the first seconds, when the boat jumped off (2026-11-22).
+            bodySearch[actor:GetAddress()] = nil
             stillBody(actor)
             soft[key] = now() + SOFT_SECONDS
             restartAnchors[key] = true
@@ -1033,23 +1117,7 @@ local function updateHold(key, actor, driving)
         s.roll = s.roll + wrap(roll - s.roll) * k
         return
     end
-    local h = hold[key]
-    if not h then
-        local s = rest[key]
-        local r = root:K2_GetComponentRotation()
-        -- Held upright: the average tilt taken while the boat bobbed (during
-        -- loading) left it standing askew (2026-11-18).
-        h = { z = s and s.z or l.Z, pitch = 0, roll = 0, x = l.X, y = l.Y, yaw = r.Yaw, lines = 0 }
-        hold[key] = h
-        setOwnMovement(key, actor, true)
-        -- Off while moored, as on 18/11: with it on, the reeling lines built up force
-        -- against the hull put back every frame, it knocked on the quay and lost health,
-        -- and let go it was thrown off (2026-11-19). Back on at release or change of owner.
-        stillBody(actor)
-        setHullPhysics(key, actor, false, true)
-        log("båt %s: förtöjd, höjd %.0f och lutning %.1f/%.1f hålls (nu %.0f, %.1f/%.1f)", key, h.z, h.pitch, h.roll,
-            l.Z, RotP(r) or 0, r.Roll or 0)
-    end
+    local h = hold[key] or startHold(key, actor, false)
     -- Taken over at the quay the hull search was still throttled, the hull kept
     -- simulating against the quay and lost health in that game only (2026-11-21).
     if not hulls[key] then setHullPhysics(key, actor, false, true) end
@@ -1057,20 +1125,23 @@ local function updateHold(key, actor, driving)
     if count ~= h.lines then
         if count >= 2 and h.lines < 2 then h.twoSince = now() end
         if count < 2 then h.twoSince = nil end
-        h.lines = count
+        h.lines, h.locked, h.stillSince = count, nil, nil
         log("båt %s: %d förtöjningslinor, %s", key, count,
-            count >= 2 and string.format("drar in %d s och låser sedan", TWO_LINE_SECONDS) or "drar in långsamt")
+            count >= 2 and "drar in tills den ligger still och låser sedan" or "drar in långsamt")
     end
-    local pulling = count == 1 or (h.twoSince ~= nil and now() - h.twoSince < TWO_LINE_SECONDS)
+    local pulling = count == 1 or (h.twoSince ~= nil and not h.locked and now() - h.twoSince < TWO_LINE_SECONDS)
     if not pulling then
         if not pulling and h.ux then log("båt %s: låst vid kajen (%.0f %.0f)", key, h.x, h.y) end
         h.ux, h.pt = nil, nil
         return
     end
-    -- Ten steps a second: each step traces up to 80 lines along the hull.
-    if h.pt and now() - h.pt < 0.1 then return end
-    local dt = math.min(now() - (h.pt or now()), 0.3)
+    -- Five steps a second, each tracing up to 80 lines along the hull: at ten the mod
+    -- took 12 ms a tick while pulling and the game lagged (user 2026-11-22). holdAll
+    -- glides the boat between steps.
+    if h.pt and now() - h.pt < PULL_STEP then return end
+    local dt = math.min(now() - (h.pt or now()), 0.4)
     h.pt = now()
+    h.px, h.py, h.pyaw = h.x, h.y, h.yaw
     local okP, dx, dy, dyaw, what = pcall(pullStep, actor, h, dt)
     if not okP then
         if not h.pullErr then h.pullErr = true log("båt %s: dragningen: %s", key, tostring(dx)) end
@@ -1084,18 +1155,31 @@ local function updateHold(key, actor, driving)
     end
     h.ux = dx ~= nil or nil
     if dx then h.x, h.y, h.yaw = h.x + dx, h.y + dy, h.yaw + dyaw end
+    if count >= 2 then
+        local moving = dx ~= nil and dt > 0 and (math.sqrt(dx * dx + dy * dy) / dt > 5 or math.abs(dyaw) / dt > 0.2)
+        if moving then
+            h.stillSince = nil
+        else
+            h.stillSince = h.stillSince or now()
+            if now() - h.stillSince >= LOCK_STILL then h.locked = true end
+        end
+    end
 end
 
 local function holdAll()
     for key, h in pairs(hold) do
         local actor = boats[key]
         if actor and actor:IsValid() and not M.peerControls(key) then
-            M.moveActor(actor, { X = h.x, Y = h.y, Z = h.z }, Rot(h.pitch, h.yaw, h.roll))
+            local x, y, yaw = heldPose(h)
+            M.moveActor(actor, { X = x, Y = y, Z = h.z }, Rot(h.pitch, yaw, h.roll))
             stillBody(actor)
         else
             -- The other game took the moored boat: this one follows, and a follower keeps
             -- its hull's physics (turned on at a later take-over, the boat threw itself about).
-            if actor and actor:IsValid() then
+            -- Not while still moored: the follower turns it off again for a held boat, and the
+            -- second on against the quay shook the boat at each handover (2026-11-22);
+            -- follow() turns it on when the other game lets go.
+            if actor and actor:IsValid() and not M.moored then
                 pcall(setHullPhysics, key, actor, true)
                 pcall(stillBody, actor)
             end
@@ -1487,9 +1571,52 @@ function M.find(key)
     if b and usable(key, b) then return b end
 end
 
+-- No hull damage while a line is in and for a while after the last is out: the
+-- boat knocked on the quay and lost health easily while moored and at the release
+-- (user 2026-11-22). Each game guards its own boat; health is not synced.
+-- The owner's health counts and is sent (bhp); the other game takes it. Each game
+-- had its own: the guest's boat, free in the guest's world until it settled, knocked
+-- on the quay on its lines and lost health the host's never did (user 2026-11-22).
+local GUARD_AFTER = 30
+local HEALTH_SEND = 2
+local guardUntil, guardHealth, healthSent = 0, {}, {}
+local function guardHull()
+    if M.moored then guardUntil = now() + GUARD_AFTER end
+    local on = now() < guardUntil
+    for key, actor in pairs(boats) do
+        if key:sub(1, 2) == "id" and actor:IsValid() then
+            local d = actor.DestructibleObjectComponent
+            local hs = healthSent[key]
+            if d and d:IsValid() and not M.peerControls(key) and (not hs or now() - hs.t > HEALTH_SEND) then
+                local h = math.floor(d.Health + 0.5)
+                if not hs or hs.h ~= h or now() - hs.t > 10 then
+                    net.send("bhp", key, tostring(h))
+                    healthSent[key] = { h = h, t = now() }
+                end
+            end
+            if not on then
+                guardHealth[key] = nil
+            elseif d and d:IsValid() then
+                local h = d.Health
+                local keep = guardHealth[key]
+                if not keep then
+                    guardHealth[key] = h
+                    log("båt %s: skyddad mot skada vid förtöjning (hälsa %.0f)", key, h)
+                elseif h < keep then
+                    d:OverrideHealth(keep)
+                elseif h > keep then
+                    guardHealth[key] = h
+                end
+            end
+        end
+    end
+end
+
 function M.tick()
     scan()
     pcall(orderTicks)
+    local okG, errG = pcall(guardHull)
+    if not okG then log("båt-skadeskydd: %s", tostring(errG)) end
     local anyPeer = false
     -- Only saved boats count; the level also holds an empty placeholder barge.
     for key in pairs(boats) do if key:sub(1, 2) == "id" and M.peerControls(key) then anyPeer = true end end
@@ -1575,9 +1702,19 @@ function M.claim(why)
                 log("båt %s: %s, gas %.3f kvar här, tar inte över", key, why, control(actor, "GetThrottleActual"))
             else
                 peerAuthority[key] = false
-                setHullPhysics(key, actor, true)
-                inheritMotion(key, actor)
-                if #M.mooringCables == 0 then restartRaisedAnchors(key) end
+                -- Moored a moment ago (the line list is from before this change): hold it
+                -- here at once, hull physics staying off. Turned on and off again a second
+                -- later, it shook against the quay at each handover; and pulling the last
+                -- line, no hold here meant no release, the anchors stayed fastened from an
+                -- earlier hold and flew off with the boat (2026-11-22). Let go, the hold
+                -- releases it the usual way.
+                if M.moored then
+                    if not hold[key] then startHold(key, actor, true) end
+                else
+                    setHullPhysics(key, actor, true)
+                    inheritMotion(key, actor)
+                    if #M.mooringCables == 0 then restartRaisedAnchors(key) end
+                end
                 net.send("bclaim", key)
                 sendState(key, actor, false)
                 log("båt %s: %s, jag styr nu", key, why)
@@ -1589,6 +1726,20 @@ end
 function M.handle(msg)
     if msg[1] == "bctl" then
         wantControls[msg[3]] = tonumber(msg[4])
+        return true
+    end
+    if msg[1] == "bhp" then
+        local key, h = msg[3], tonumber(msg[4])
+        local actor = boats[key]
+        if h and actor and actor:IsValid() and M.peerControls(key) then
+            pcall(function()
+                local d = actor.DestructibleObjectComponent
+                if math.abs(d.Health - h) >= 1 then
+                    d:OverrideHealth(h)
+                    if guardHealth[key] then guardHealth[key] = h end
+                end
+            end)
+        end
         return true
     end
     if msg[1] == "bclaim" then
@@ -1641,6 +1792,7 @@ function M.reset()
     boats, lastScan, remote, peerAuthority, described, lastPawnClass, bodies, bodySearch, lastSent = {}, -100, {}, {}, {}, nil, {}, {}, {}
     anchorParts, soft, throttleOn, anchorLiftAt, lastSet, trapLast, restartAnchors = {}, {}, {}, {}, {}, {}, {}
     wantControls, lastControls, lastControlSend, orderedPawn, lastRel = {}, {}, 0, nil, nil
+    guardUntil, guardHealth, healthSent = 0, {}, {}
 end
 
 return M

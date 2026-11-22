@@ -180,7 +180,14 @@ end
 local POS_INTERVAL = 1 / 30
 -- 0.12 ran out when a position arrived 0.10-0.13 s after the last one (seen
 -- in the docka log line) and the guest's puppet stopped for a moment.
+-- Over Steam between two homes the arrival times vary more than on one computer, and
+-- players "teleported from place to place" (player report 2026-11-22): the delay grows
+-- with the jitter seen in the last seconds (how much later than the quickest a position
+-- arrived), from PUPPET_DELAY up to PUPPET_DELAY_MAX.
 local PUPPET_DELAY = 0.16
+local PUPPET_DELAY_MAX = 0.5
+local JITTER_DECAY = 0.98   -- per position (30 a second): the peak fades over a few seconds
+local jitterPeak = 0
 local MAX_EXTRAPOLATE = 0.2
 local posBuf, posOffset, lastPosSent, posReady = {}, nil, -100, false
 local posRelaxedAt
@@ -199,7 +206,7 @@ local function notePosGap(st)
     end
     g.lastRecv, g.lastSt = r, st
     if r - g.at >= 5 then
-        if g.n > 0 then log("docka: %d luckor över 0,1 s, längsta ankomst %.0f ms, längsta avsändning %.0f ms", g.n, g.recvMax * 1000, g.sendMax * 1000) end
+        if g.n > 0 then log("docka: %d luckor över 0,1 s, längsta ankomst %.0f ms, längsta avsändning %.0f ms, jitter %.0f ms", g.n, g.recvMax * 1000, g.sendMax * 1000, jitterPeak * 1000) end
         g.at, g.n, g.recvMax, g.sendMax = r, 0, 0, 0
     end
 end
@@ -211,6 +218,10 @@ local function addPosSample(t)
     -- means the other game restarted and its clock with it.
     if not posOffset or off < posOffset or off - posOffset > 1 then posOffset = off end
     t.off = off
+    jitterPeak = math.max(jitterPeak * JITTER_DECAY, off - posOffset)
+    -- Positions go unreliable: one arriving after a newer one is dropped. Appended in
+    -- arrival order, it put the puppet back and forth.
+    if #posBuf > 0 and t.st <= posBuf[#posBuf].st and posBuf[#posBuf].boat == t.boat then return end
     if #posBuf > 0 and posBuf[#posBuf].boat ~= t.boat then posBuf = {} end
     posBuf[#posBuf + 1] = t
     if #posBuf > 30 then table.remove(posBuf, 1) end
@@ -224,7 +235,8 @@ local function puppetSample()
     local t = realTime()
     posOffset = boat.relaxOffset(posOffset, posBuf, t - (posRelaxedAt or t))
     posRelaxedAt = t
-    local renderT = t - posOffset - PUPPET_DELAY
+    local delay = math.min(PUPPET_DELAY_MAX, math.max(PUPPET_DELAY, jitterPeak + 0.06))
+    local renderT = t - posOffset - delay
     for i = n - 1, 1, -1 do
         local a, b = posBuf[i], posBuf[i + 1]
         if a.st <= renderT and renderT <= b.st then

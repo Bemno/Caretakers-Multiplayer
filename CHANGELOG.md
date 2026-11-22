@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.14 — 2026-11-22
+
+Hotfix for mooring and the other player's movement. Still a beta for 2 players; feedback is very welcome.
+
+- Letting go of the mooring lines one player each no longer throws the boat about.
+- Handing the boat over between players while moored is smooth: no more shaking.
+- The boat takes no damage while a line is in and for 30 s after the last one is out.
+- Boat health is now the same for both players.
+- Lines put farther along the quay draw the boat along it, as in singleplayer; with two lines it locks once it lies still.
+- The boat swings in flat against the quay instead of lying at an angle.
+- Letting go of the last line: the boat drifts off slowly instead of jumping.
+- A line stretched past its length (the boat's own, back at the old bollard) is let go instead of yanking the boat.
+- Pulling in is smoother and lighter on the game.
+- The other player's movement is smoother over Steam: late network packets no longer make them jump.
+
 ## 0.2.13 — 2026-11-21
 
 Hotfix for 0.2.12: flying creatures were copied between the games and multiplied, and the second player lagged badly when arriving in a new area.

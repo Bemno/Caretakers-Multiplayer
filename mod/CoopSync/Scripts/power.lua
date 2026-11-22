@@ -399,6 +399,25 @@ local function plugCount(st)
     return (a ~= "-" and 1 or 0) + (b ~= "-" and 1 or 0)
 end
 
+-- The boat's built-in line comes back plugged into the bollard it started at. Once
+-- the boat had slid 15 m along the quay that line was stretched past its length:
+-- given physics at the release the boat was yanked about and threw the player off,
+-- and the other game's copy could not be plugged in and was made again every
+-- second (user 2026-11-22). A line plugged at both ends farther apart than it can
+-- reach (2000 cm at most) is let go at the quay end, as when a player lets go of it.
+local MOOR_MAX_SPAN = 2100
+local function stretchedOff(c, key, a, b)
+    local pa, pb = c.SphereA:K2_GetComponentLocation(), c.SphereB:K2_GetComponentLocation()
+    local span = math.sqrt((pa.X - pb.X) ^ 2 + (pa.Y - pb.Y) ^ 2 + (pa.Z - pb.Z) ^ 2)
+    if span <= MOOR_MAX_SPAN then return false end
+    local quay = a:find("Socket_Female", 1, true) and a or b:find("Socket_Female", 1, true) and b
+    local sock = quay and M.findSocket(quay)
+    if not (sock and sock:IsValid()) then return false end
+    local ok = pcall(function() sock:ReleaseSocketCable(localPC().Pawn) end)
+    log("kabel %s: förtöjningslina sträckt %.0f cm, släpps vid kajen: %s", tostring(key), span, ok and "ok" or "fel")
+    return ok
+end
+
 local function pollCables()
     if now() - lastPoll < CABLE_POLL_SECONDS or #pendingCables > 0 then return end
     lastPoll = now()
@@ -412,6 +431,11 @@ local function pollCables()
         local okA, a, b = pcall(plugsOf, c)
         if okA and a ~= "-" and b ~= "-" then
             local okM, isMoor = pcall(function() return c.bMooringCable end)
+            local okS, off = false, false
+            if okM and isMoor then okS, off = pcall(stretchedOff, c, key, a, b) end
+            if okS and off then
+                isMoor = false
+            end
             if okM and isMoor then
                 moored = true
                 local okL, len = pcall(function() return c.Cable.CableLength end)
