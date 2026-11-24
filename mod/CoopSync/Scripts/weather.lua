@@ -10,7 +10,10 @@ local PERSIST_CLASS = "/Script/Voyage.VoyagePersistentActorComponent"
 local SEND_SECONDS = 2
 local MOVE_TOLERANCE = 1000       -- cm
 local CURVE_TOLERANCE = 10        -- s
-local TIME_TOLERANCE = 60
+-- The guest's clock falls behind ~10 s a minute. Jumping 60 s at a time made
+-- the shadows jump (~7 degrees); small gaps are now closed half at a time.
+local TIME_SNAP = 60              -- s, larger gaps (load, sleep) jump at once
+local TIME_NUDGE = 0.5            -- s
 
 local net, log, localPC, now, props, console, isHost
 local lastSend, lastProbe, lastMirror = 0, -100, -100
@@ -307,9 +310,11 @@ function M.handle(msg)
         local t, want = worldTime(), tonumber(msg[3])
         if t and want then
             local diff = t.WorldTime - want
-            if math.abs(diff) > TIME_TOLERANCE then
+            if math.abs(diff) > TIME_SNAP then
                 log("väder: världstid %.0f -> %.0f (värdens)", t.WorldTime, want)
                 t.WorldTime = want
+            elseif math.abs(diff) > TIME_NUDGE then
+                t.WorldTime = t.WorldTime - diff / 2
             end
         end
         return true

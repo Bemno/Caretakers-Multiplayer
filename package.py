@@ -50,6 +50,9 @@ def build_coopnet():
                     str(ROOT / "coopnet" / "coopnet.py")], check=True)
     shutil.rmtree(COOPNET, ignore_errors=True)
     shutil.copytree(work / "coopnet.dist", COOPNET)
+    # CI passes the bug report webhook as a secret; it is never in the repo.
+    if os.environ.get("REPORT_WEBHOOK"):
+        (COOPNET / "webhook.txt").write_text(os.environ["REPORT_WEBHOOK"].strip(), encoding="utf-8")
 
 
 def build_installer(version):
@@ -94,6 +97,8 @@ def write_sums(files):
 
 def main(version):
     DIST.mkdir(exist_ok=True)
+    # Shown on the Multiplayer page.
+    (SCRIPTS / "release.lua").write_text(f'return "{version}"\n', encoding="ascii")
     fetch_ue4ss()
     build_coopnet()
     files = [build_installer(version), build_zip(version)]

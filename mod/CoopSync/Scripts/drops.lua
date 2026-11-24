@@ -188,6 +188,50 @@ local function countOf(actor, item)
     return (ok and n and n > 0) and n or 1
 end
 
+-- The item's own state (weapon wear and attachments, charge) lies as bytes in
+-- its inventory slot. Copies spawned without it were sometimes recycled into
+-- materials when picked up (todo 21/11). Sent as hex with the drop.
+-- SetSlotData with a byte list from Lua crashed the game (UE4SS 4, even 8
+-- bytes; bench 2026-11-22), so the receiver writes into the slot's own array.
+local function firstSlot(inv)
+    for i = 0, 40 do if inv:IsSlotOccupied(i) then return i end end
+end
+
+local function stateOf(actor)
+    local inv = inventoryOf(actor)
+    local slot = inv and firstSlot(inv)
+    if not slot then return "", "" end
+    local o = {}
+    if not inv:GetSlot(slot, o) then return "", "" end
+    local d = (o.OutItemData or o).Data
+    local hex = {}
+    local raw = d.ItemData
+    if type(raw) == "table" then
+        for _, v in ipairs(raw) do hex[#hex + 1] = string.format("%02x", type(v) == "number" and v or v:get()) end
+    else
+        raw:ForEach(function(_, v) hex[#hex + 1] = string.format("%02x", v:get()) end)
+    end
+    if #hex == 0 then return "", "" end
+    return table.concat(hex), tostring(d.Flags)
+end
+
+local function applyState(actor, hex, flags)
+    local n = 0
+    inventoryOf(actor).Items:ForEach(function(_, v)
+        if n > 0 then return end
+        local data = v:get().Data
+        local arr = data.ItemData
+        local i = 0
+        for h in hex:gmatch("%x%x") do
+            i = i + 1
+            arr[i] = tonumber(h, 16)
+        end
+        if tonumber(flags) then data.Flags = tonumber(flags) end
+        n = arr:GetArrayNum()
+    end)
+    return n
+end
+
 -- Copies without physics waiting for the sender's rest message. One never put
 -- down (the message lost, or taken by another item with the same save id)
 -- gets its place by the same rules as a rest after WAIT_FOR_REST.
@@ -265,6 +309,10 @@ local function claimForPeer(actor, item, loc)
                 pcall(function() root:SetSimulatePhysics(false) end)
                 waiting[#waiting + 1] = { path = pathOf(actor), untilT = now() + WAIT_FOR_REST }
             end
+            if p.state ~= "" then
+                local okA, n = pcall(applyState, actor, p.state, p.flags)
+                log("släpp från andra: tillstånd %s", okA and (n .. " byte") or tostring(n))
+            end
             local have = item and countOf(actor, item) or p.count
             if p.count > have then
                 local ok, err = pcall(function() inventoryOf(actor):AddItems({ [item] = p.count - have }, true, true, 0) end)
@@ -279,6 +327,31 @@ local function claimForPeer(actor, item, loc)
     return false
 end
 
+-- Walking into a new area or a burst of spawns queued hundreds of new items,
+-- each examined in full with every machine looked up by path: 50-340 ms
+-- stalls several times a minute (2026-11-24). Far items are dropped early
+-- when no drop from the other player is due, and the queue has a budget.
+local EXAMINE_BUDGET = 0.004
+local machineSpots, machineSpotsAt = {}, -100
+
+local function farFromEverything(loc)
+    if #pendingPeer > 0 then return false end
+    local pawn = localPC().Pawn
+    if not (pawn and pawn:IsValid()) then return false end
+    if dist(loc, pawn:K2_GetActorLocation()) <= DROP_RADIUS then return false end
+    if M.machines then
+        if now() - machineSpotsAt > 1 then
+            machineSpotsAt = now()
+            local ok, spots = pcall(M.machines.positions)
+            machineSpots = ok and spots or {}
+        end
+        for _, m in ipairs(machineSpots) do
+            if dist(loc, m) < MACHINE_RADIUS then return false end
+        end
+    end
+    return true
+end
+
 local function examine(entry)
     if entry.crafted then
         if now() - entry.crafted < CRAFT_WAIT then return "retry" end
@@ -289,6 +362,7 @@ local function examine(entry)
     local actor = StaticFindObject(entry.path)
     entry.t = entry.t or now()
     if not (actor and actor:IsValid() and (entry.module or isDynamic(actor))) then return end
+    if not entry.frozen and farFromEverything(actor:K2_GetActorLocation()) then return end
     local item = itemOf(actor)
     -- An egg sack spawned for the host's never gets CurrentVisualizeItem, so
     -- it was never linked and the guest removed it as its own (2026-11-17).
@@ -351,8 +425,10 @@ local function examine(entry)
     pcall(props.registerOwn, id, ownPc)
     local rawId = id
     id = props.wire(id)
+    local okS, hex, flags = pcall(stateOf, actor)
+    if not okS then log("släpp: kunde inte läsa föremålets tillstånd: %s", tostring(hex)) hex, flags = "", "" end
     net.send("drop", id, pathOf(item), f1(loc.X), f1(loc.Y), f1(loc.Z), f1(RotP(r)), f1(r.Yaw), f1(r.Roll), countOf(actor, item),
-        kind, bkey, rel and f1(rel.X) or "", rel and f1(rel.Y) or "", rel and f1(rel.Z) or "")
+        kind, bkey, rel and f1(rel.X) or "", rel and f1(rel.Y) or "", rel and f1(rel.Z) or "", hex, flags)
     -- A frozen drop is not streamed: the host's copy lands and the guest's follows.
     -- On a boat this game moves, it is watched like a let-go crate: streamed
     -- until it rests, then welded there in both games.
@@ -378,12 +454,75 @@ end
 -- Registered only once the world has settled: during loading BeginPlay runs
 -- for thousands of actors, and entering Lua that often has crashed UE4SS.
 local hooked = false
+
+-- A short E on a loose weapon broke it into materials (SpawnDestroyedActor,
+-- then RecycleItems) in MP, for copies and for the guest's own drops alike,
+-- while singleplayer picks it up; the cause was not found (2026-11-22). The
+-- hook picks the weapon up first, so the breaking finds an empty actor.
+local DESTROY_FN = "/Script/Voyage.VoyageDestructibleObjectComponent:SpawnDestroyedActor"
+local PICKUP_RADIUS = 400
+
+-- Once the breaking has begun CollectActor says no (the other player's drop,
+-- 2026-11-23). The weapon is moved by hand instead, item state and all, and
+-- the emptied actor leaves nothing to recycle.
+local function moveWeaponToPlayer(actor, item, pawn)
+    local hex, flags = stateOf(actor)
+    local src = inventoryOf(actor)
+    if not src then return end
+    for _, owner in ipairs({ pawn, localPC() }) do
+        for _, e in ipairs(owner:K2_GetComponentsByClass(StaticFindObject(INV_CLASS)) or {}) do
+            local inv = e
+            pcall(function() inv = e:get() end)
+            local before = inv:GetNumItems(item)
+            inv:AddItems({ [item] = 1 }, true, true, 0)
+            if inv:GetNumItems(item) > before then
+                src:RemoveItem(item, 1, -1, true)
+                local applied = 0
+                if hex ~= "" then
+                    inv.Items:ForEach(function(_, v)
+                        if applied > 0 then return end
+                        pcall(function()
+                            local s = v:get()
+                            if s.AssetName:ToString() ~= item:GetFName():ToString() or s.Data.ItemData:GetArrayNum() > 0 then return end
+                            local i = 0
+                            for h in hex:gmatch("%x%x") do i = i + 1 s.Data.ItemData[i] = tonumber(h, 16) end
+                            if tonumber(flags) then s.Data.Flags = tonumber(flags) end
+                            applied = i
+                        end)
+                    end)
+                end
+                log("vapen %s flyttat till %s, tillstånd %d byte", item:GetFName():ToString(), inv:GetFName():ToString(), applied)
+                return
+            end
+        end
+    end
+    log("vapen %s: fick inte plats", item:GetFName():ToString())
+end
+
+local function pickUpWeapon(ctx)
+    local actor = ctx:get():GetOwner()
+    if not (actor and actor:IsValid() and isDynamic(actor)) then return end
+    local item = itemOf(actor)
+    log("skrotas: %s (%s)", actor:GetFName():ToString(), item and item:GetFName():ToString() or "?")
+    if not (item and item:GetFName():ToString():find("DA_Weapon_", 1, true)) then return end
+    local pawn = localPC().Pawn
+    if not (pawn and pawn:IsValid()) or dist(pawn:K2_GetActorLocation(), actor:K2_GetActorLocation()) > PICKUP_RADIUS then return end
+    local ok = pawn:CollectActor(actor)
+    log("vapen %s: E skulle skrota det, plockat upp i stället: %s", item:GetFName():ToString(), tostring(ok))
+    if not ok then moveWeaponToPlayer(actor, item, pawn) end
+end
+
 local function arm()
     if hooked then return end
     hooked = true
     local ok, err = pcall(RegisterBeginPlayPostHook, function(ctx) pcall(onBeginPlay, ctx) end)
     armed = ok
     log("släppsynk: %s", ok and "ok" or tostring(err))
+    local okW, errW = pcall(RegisterHook, DESTROY_FN, function(ctx)
+        local okP, errP = pcall(pickUpWeapon, ctx)
+        if not okP then log("vapenupplockning: %s", tostring(errP)) end
+    end)
+    log("vapen på E: %s", okW and "ok" or tostring(errW))
 end
 
 function M.tick()
@@ -394,7 +533,12 @@ function M.tick()
     noteCrafting()
     local q = queue
     queue = {}
-    for _, entry in ipairs(q) do
+    local c0 = os.clock()
+    for i, entry in ipairs(q) do
+        if os.clock() - c0 > EXAMINE_BUDGET then
+            for j = i, #q do queue[#queue + 1] = q[j] end
+            break
+        end
         local ok, res = pcall(examine, entry)
         if not ok then log("släpp-fel: %s", tostring(res))
         elseif res == "retry" then queue[#queue + 1] = entry end
@@ -449,7 +593,7 @@ local function spawnForPeer(msg)
     local rot = Rot(tonumber(msg[8]), tonumber(msg[9]), tonumber(msg[10]))
     local item = findItem(path)
     if not item then log("släpp från andra: hittar inte föremålet %s", path) return end
-    pendingPeer[#pendingPeer + 1] = { peerId = peerId, item = path, loc = loc, rot = rot, t = now(), count = tonumber(msg[11]) or 1, world = msg[12] == "w", frozen = msg[12] == "f" or msg[12] == "m", machineOut = msg[12] == "m" }
+    pendingPeer[#pendingPeer + 1] = { peerId = peerId, item = path, loc = loc, rot = rot, t = now(), count = tonumber(msg[11]) or 1, world = msg[12] == "w", frozen = msg[12] == "f" or msg[12] == "m", machineOut = msg[12] == "m", state = msg[17] or "", flags = msg[18] or "" }
     local transform = {
         Translation = loc,
         Rotation = { X = 0, Y = 0, Z = 0, W = 1 },

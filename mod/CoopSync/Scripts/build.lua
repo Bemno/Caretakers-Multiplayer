@@ -47,12 +47,14 @@ local function dist(a, b)
     return math.sqrt((a.X - b.X) ^ 2 + (a.Y - b.Y) ^ 2 + (a.Z - b.Z) ^ 2)
 end
 
--- Paths of actors with a persistent component within NEAR of loc.
+-- Paths of modules within NEAR of loc. Only modules can be what a blueprint
+-- became; going through every saved object took 200-370 ms for each new
+-- blueprint (2026-11-24).
 local function actorsNear(loc)
     local set = {}
-    for _, pc in ipairs(listOf("VoyagePersistentActorComponent")) do
+    for _, mc in ipairs(listOf("VoyageModuleComponent")) do
         pcall(function()
-            local a = pc:GetOwner()
+            local a = mc:GetOwner()
             if a and a:IsValid() and dist(a:K2_GetActorLocation(), loc) < NEAR then set[pathOf(a)] = a end
         end)
     end
@@ -510,12 +512,17 @@ local function vanished(path, f)
     log("bygge: min blueprint %s borttagen", f.key)
 end
 
+-- A blueprint without a save id yet is described again only after a while.
+local DESCRIBE_AGAIN = 5
+local describeTried = {}   -- path -> time
+
 local function poll()
     local seen = {}
     for _, fab in ipairs(listOf(FAB)) do
         local path = pathOf(fab)
         seen[path] = true
-        if not fabs[path] then
+        if not fabs[path] and now() - (describeTried[path] or -100) >= DESCRIBE_AGAIN then
+            describeTried[path] = now()
             local ok, f = pcall(describe, fab)
             if not ok and not M.reported then
                 M.reported = true
@@ -552,6 +559,9 @@ local function poll()
             local ok, err = pcall(vanished, path, w.f)
             if not ok then log("bygge-fel: %s", tostring(err)) end
         end
+    end
+    for path in pairs(describeTried) do
+        if not seen[path] then describeTried[path] = nil end
     end
     for path, f in pairs(fabs) do
         if not seen[path] then

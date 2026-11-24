@@ -1,114 +1,20 @@
--- Charging player to player. Looking at the puppet's head, J gives power to
--- the other player and K takes power from them; the same key again stops.
--- The puppet's hidden box (peerinv.lua) sits at the head, and its name shows
--- the choices next to the game's own "open" prompt.
--- The giver takes the power out of its own battery and sends it (pwr); the
--- receiver adds what fits and sends back what did not (pwrback), which also
--- stops the transfer. Taking asks the other to give (pwrask).
+-- Charging player to player through a cable into the puppet's chest. The
+-- giver takes the power out of its own battery and sends it (pwr); the
+-- receiver adds what fits and sends back what did not (pwrback). J/K at the
+-- puppet's head were removed (2026-11-24, not wanted).
 local M = {}
 
-local RATE = 25             -- battery units per second (a player holds about 500)
 local STEP = 0.5
 local RESERVE = 0.05        -- the giver keeps 5 % of its battery
-local LOOK_DIST, LOOK_COS = 450, math.cos(math.rad(14))
-local KEEP_DIST = 800       -- a transfer stops when the players are further apart
-local HEAD_Z = 155          -- the puppet actor stands at its feet; head bone at 160
 local ELECTRICITY = 0
 
 local net, log, localPC, now, puppetFn, peerinv, T, console
-local giving, givingFor = false, nil  -- givingFor: "me" (J) or "ask" (the other pressed K)
-local taking = false
-local looking = false
 local peerLevel, peerMax = nil, nil
-local lastStep, lastLook, lastLevel = -100, -100, -100
-local keys = {}             -- key presses, handled on the tick
-local shownName
+local lastLevel = -100
 
 local function battery()
     local pm = localPC().Pawn.PlayerModuleComponent
     return pm, pm:GetResourceAmount(ELECTRICITY), pm:GetMaxResourceAmount(ELECTRICITY)
-end
-
-local function headOf(puppet)
-    local l = puppet:K2_GetActorLocation()
-    return { X = l.X, Y = l.Y, Z = l.Z + HEAD_Z }
-end
-
-local function lookingAtHead(puppet)
-    local cm = localPC().PlayerCameraManager
-    local c = cm:GetCameraLocation()
-    local r = cm:GetCameraRotation()
-    local h = headOf(puppet)
-    local dx, dy, dz = h.X - c.X, h.Y - c.Y, h.Z - c.Z
-    local d = math.sqrt(dx * dx + dy * dy + dz * dz)
-    if d > LOOK_DIST or d < 1 then return false end
-    -- The camera's real pitch, whatever PITCH_FIX says: RotP gave nil under UE4SS 4 and
-    -- looking at the other player's head never counted (pcall log 2026-11-19).
-    local p, y = math.rad(r.pitch or r.Pitch or 0), math.rad(r.Yaw)
-    local fx, fy, fz = math.cos(p) * math.cos(y), math.cos(p) * math.sin(y), math.sin(p)
-    return (fx * dx + fy * dy + fz * dz) / d > LOOK_COS
-end
-
-local function near(puppet)
-    local a, b = localPC().Pawn:K2_GetActorLocation(), puppet:K2_GetActorLocation()
-    return (a.X - b.X) ^ 2 + (a.Y - b.Y) ^ 2 + (a.Z - b.Z) ^ 2 < KEEP_DIST ^ 2
-end
-
-local function pct(v, m) return (m and m > 0) and math.floor(v / m * 100 + 0.5) or 0 end
-
-local function updateName()
-    local name
-    if giving and givingFor == "me" then name = T("power_giving")
-    elseif giving then name = T("power_given")
-    elseif taking then name = T("power_taking")
-    else name = T("power_choices") end
-    if peerLevel then name = name .. "  " .. T("power_friend", pct(peerLevel, peerMax)) end
-    if name ~= shownName then
-        shownName = name
-        peerinv.setName(name)
-    end
-end
-
-local function stopGiving(why)
-    if not giving then return end
-    giving, givingFor = false, nil
-    log("ström: slutar ge (%s)", why)
-end
-
-local function stopTaking(why, tell)
-    if not taking then return end
-    taking = false
-    if tell then net.send("pwrask", 0) end
-    log("ström: slutar ta (%s)", why)
-end
-
-local function onKey(which)
-    if which == "J" then
-        if giving and givingFor == "me" then stopGiving("J igen") return end
-        if not looking then return end
-        stopTaking("byter till ge", true)
-        giving, givingFor = true, "me"
-        log("ström: ger till kompisen")
-    elseif which == "K" then
-        if taking then stopTaking("K igen", true) return end
-        if not looking then return end
-        stopGiving("byter till ta")
-        taking = true
-        net.send("pwrask", 1)
-        log("ström: tar från kompisen")
-    end
-end
-
-local function give()
-    local pm, have, max = battery()
-    local amount = math.min(RATE * STEP, have - max * RESERVE)
-    if amount <= 0 then
-        stopGiving("eget batteri nästan tomt")
-        net.send("pwrstop", "tomt")
-        return
-    end
-    pm:AddResource(ELECTRICITY, -amount)
-    net.send("pwr", string.format("%.2f", amount))
 end
 
 -- Body socket on the puppet -------------------------------------------------
@@ -136,6 +42,11 @@ local CHEST_BONE = "PowerSocket"
 local function pathOf(a) return a:GetFullName():match("%S+%s+(%S+)") end
 local body = {}                -- batPath, puppetAddr
 local flowLog = { sent = 0, got = 0, at = 0 }
+-- Power is decided in 0.5 s steps but moved a little every frame: added or
+-- taken 25 units at a time, the game's charge rate swung between -120 and
+-- -400 all the time (2026-11-24).
+local pending = { inn = 0, out = 0 }
+local lastFrame
 local lastBody = -100
 
 local function socketOf(bat)
@@ -317,7 +228,14 @@ end
 local function writeMode(c, bodyIsA, mode)
     local bodyDir = mode == "give" and 2 or mode == "take" and 1 or 0
     local batDir = mode == "give" and 1 or mode == "take" and 2 or 0
-    if bodyIsA then c.DirectionA, c.DirectionB = bodyDir, batDir else c.DirectionA, c.DirectionB = batDir, bodyDir end
+    local da, db = bodyDir, batDir
+    if not bodyIsA then da, db = batDir, bodyDir end
+    -- Through the socket as F does it: written straight into the fields, the
+    -- arrow and the flow animation kept the old way (diesel, 2026-11-24).
+    local sa, sb = c:GetSocket(c.ConnectorMeshA), c:GetSocket(c.ConnectorMeshB)
+    if sa and sa:IsValid() and (da ~= 0 or db == 0 or not (sb and sb:IsValid())) then pcall(function() sa:SetSocketDirectionType(da) end)
+    elseif sb and sb:IsValid() then pcall(function() sb:SetSocketDirectionType(db) end) end
+    if c.DirectionA ~= da or c.DirectionB ~= db then c.DirectionA, c.DirectionB = da, db end
 end
 
 local function setHostDir(mode, fromHostSide)
@@ -354,7 +272,25 @@ local function markFlow(fromBody)
 end
 
 local frameHooked = false
+local function spread()
+    local t = now()
+    local dt = lastFrame and math.min(t - lastFrame, 0.1) or 0
+    lastFrame = t
+    if pending.inn <= 0 and pending.out <= 0 then return end
+    local pm = localPC().Pawn.PlayerModuleComponent
+    for _, k in ipairs({ "inn", "out" }) do
+        local p = pending[k]
+        if p > 0 then
+            -- One step's amount (25) lasts its 0.5 s; a backlog goes faster.
+            local x = math.min(p, math.max(BALANCE_RATE, p * 2) * dt)
+            pending[k] = p - x
+            if k == "inn" then pm:ForceAddResource(ELECTRICITY, x) else pm:AddResource(ELECTRICITY, -x) end
+        end
+    end
+end
+
 local function flowFrame()
+    pcall(spread)
     if not (body.flowUntil and now() < body.flowUntil and body.cablePath) then return end
     local c = StaticFindObject(body.cablePath)
     if not (c and c:IsValid()) then body.cablePath = nil return end
@@ -380,8 +316,8 @@ local function balance(bat)
     if not okM then log("kroppsuttag-läge: %s", tostring(errM)) end
     if not Coop.props.isHost then return end
     if not (peerLevel and peerMax and peerMax > 0) then return end
-    if giving or taking then return end
     local pm, have, max = battery()
+    have = have + pending.inn - pending.out
     if not (max and max > 0) then return end
     local amount, hostGives
     if hostDir == 0 then
@@ -397,7 +333,7 @@ local function balance(bat)
     end
     if amount < 0.5 then return end
     if hostGives then
-        pm:AddResource(ELECTRICITY, -amount)
+        pending.out = pending.out + amount
         net.send("pwr", string.format("%.2f", amount))
         flowLog.sent = flowLog.sent + amount
         markFlow(true)
@@ -454,6 +390,39 @@ local function bodyStep()
     end
 end
 
+-- Fastened to the bone in whatever pose the puppet had when it was made: made
+-- while the other player sat at the wheel, it ended up at the knees pointing
+-- up once they stood (27 cm up instead of 116, 2026-11-23). While the puppet
+-- stands still and upright, a socket off its place is fastened again.
+local REANCHOR_CHECK = 2
+local REANCHOR_OFF = 6         -- cm
+local REANCHOR_FACE = 0.95     -- dot product with the wanted face direction
+
+local function reanchor(puppet)
+    local bat = StaticFindObject(body.batPath)
+    local sock = bat and bat:IsValid() and socketMesh(bat)
+    if not sock then return end
+    local l, f, u = puppet:K2_GetActorLocation(), puppet:GetActorRightVector(), puppet:GetActorUpVector()
+    local last = body.lastPos
+    body.lastPos = l
+    if not last or (l.X - last.X) ^ 2 + (l.Y - last.Y) ^ 2 + (l.Z - last.Z) ^ 2 > 4 then return end
+    local bone = puppet.SkeletalMeshComponent:GetSocketLocation(FName(CHEST_BONE))
+    local boneUp = dot({ X = bone.X - l.X, Y = bone.Y - l.Y, Z = bone.Z - l.Z }, u)
+    if math.abs(boneUp - POWERSOCKET_HEIGHT) > 10 then return end
+    local s = sock:K2_GetComponentLocation()
+    local d = { X = s.X - l.X, Y = s.Y - l.Y, Z = s.Z - l.Z }
+    local r = puppet:GetActorForwardVector()
+    local off = math.sqrt((dot(d, f) - SOCKET_FORWARD) ^ 2 + dot(d, r) ^ 2 + (dot(d, u) - POWERSOCKET_HEIGHT - SOCKET_UP) ^ 2)
+    local c, sn = math.cos(math.rad(SOCKET_TILT)), math.sin(math.rad(SOCKET_TILT))
+    local face = dot(sock:GetRightVector(), comb(f, u, f, c, -sn, 0))
+    if off <= REANCHOR_OFF and face >= REANCHOR_FACE then return end
+    bat:K2_DetachFromActor(1, 1, 1)
+    turnBody(bat, puppet)
+    placeBody(bat, puppet)
+    bat:K2_AttachToComponent(puppet.SkeletalMeshComponent, FName(CHEST_BONE), 1, 1, 1, false)
+    log("kroppsuttag: fäst om, satt %.0f cm fel och yta %.2f", off, face)
+end
+
 local function bodyTick(puppet)
     if body.puppetAddr and body.puppetAddr ~= puppet:GetAddress() then removeBody() end
     if not body.batPath then
@@ -467,23 +436,15 @@ local function bodyTick(puppet)
     if not body.attached then
         local bat = StaticFindObject(body.batPath)
         if bat and bat:IsValid() then pcall(placeBody, bat, puppet) end
+    elseif now() - (body.checked or 0) >= REANCHOR_CHECK then
+        body.checked = now()
+        local ok, err = pcall(reanchor, puppet)
+        if not ok then log("kroppsuttag-omfästning: %s", tostring(err)) end
     end
     if now() - lastBody >= STEP then
         lastBody = now()
         local ok, err = pcall(bodyStep)
         if not ok then log("kroppsuttag-fel: %s", tostring(err)) end
-    end
-end
-
-local bound = false
-local function bindKeys()
-    if bound then return end
-    bound = true
-    -- Only flags here; the work happens on the tick (UE4SS runs key callbacks
-    -- outside the mod loop). On the test bench both copies get every key.
-    for _, k in ipairs({ "J", "K" }) do
-        local ok, err = pcall(RegisterKeyBind, Key[k], function() keys[#keys + 1] = k end)
-        log("ström: tangent %s %s", k, ok and "ok" or tostring(err))
     end
 end
 
@@ -494,45 +455,23 @@ end
 function M.socketPath() return body.batPath end
 
 function M.reset()
-    giving, givingFor, taking, looking, peerLevel, peerMax, shownName = false, nil, false, false, nil, nil, nil
-    keys = {}
+    peerLevel, peerMax = nil, nil
+    pending.inn, pending.out, lastFrame = 0, 0, nil
     body, lastBody = {}, -100
 end
 
 function M.tick()
-    bindKeys()
     local puppet = puppetFn()
     if not (puppet and puppet:IsValid()) then
-        stopGiving("ingen docka")
-        stopTaking("ingen docka", false)
-        keys = {}
         if body.batPath then pcall(removeBody) end
         return
     end
     bodyTick(puppet)
-    if now() - lastLook >= 0.1 then
-        lastLook = now()
-        local ok, l = pcall(lookingAtHead, puppet)
-        looking = ok and l
-    end
-    local pressed = keys
-    keys = {}
-    for _, k in ipairs(pressed) do onKey(k) end
     if now() - lastLevel >= 2 then
         lastLevel = now()
         local ok, _, have, max = pcall(battery)
-        if ok then net.send("pwrlvl", string.format("%.1f", have), string.format("%.1f", max)) end
+        if ok then net.send("pwrlvl", string.format("%.1f", have + pending.inn - pending.out), string.format("%.1f", max)) end
     end
-    if (giving or taking) and not near(puppet) then
-        stopGiving("för långt bort")
-        stopTaking("för långt bort", true)
-    end
-    if giving and now() - lastStep >= STEP then
-        lastStep = now()
-        local ok, err = pcall(give)
-        if not ok then log("ström-fel: %s", tostring(err)) stopGiving("fel") end
-    end
-    pcall(updateName)
 end
 
 function M.handle(msg)
@@ -540,13 +479,10 @@ function M.handle(msg)
     if kind == "pwr" then
         local amount = tonumber(msg[3]) or 0
         local ok, err = pcall(function()
-            local pm, have, max = battery()
-            local fits = math.max(0, math.min(amount, max - have))
-            if fits > 0 then pm:ForceAddResource(ELECTRICITY, fits) markFlow(false) end
-            if fits < amount then
-                net.send("pwrback", string.format("%.2f", amount - fits))
-                stopTaking("fullt", false)
-            end
+            local _, have, max = battery()
+            local fits = math.max(0, math.min(amount, max - have - pending.inn))
+            if fits > 0 then pending.inn = pending.inn + fits markFlow(false) end
+            if fits < amount then net.send("pwrback", string.format("%.2f", amount - fits)) end
         end)
         if not ok then log("ström-fel: %s", tostring(err)) end
         return true
@@ -558,10 +494,10 @@ function M.handle(msg)
         -- The host balancing a player-to-player cable asks for this much.
         local amount = tonumber(msg[3]) or 0
         local ok, err = pcall(function()
-            local pm, have = battery()
-            local give = math.min(amount, have)
+            local _, have = battery()
+            local give = math.min(amount, have - pending.out)
             if give > 0 then
-                pm:AddResource(ELECTRICITY, -give)
+                pending.out = pending.out + give
                 net.send("pwr", string.format("%.2f", give))
                 markFlow(true)
             end
@@ -570,20 +506,7 @@ function M.handle(msg)
         return true
     elseif kind == "pwrback" then
         local amount = tonumber(msg[3]) or 0
-        pcall(function() local pm = battery() pm:ForceAddResource(ELECTRICITY, amount) end)
-        stopGiving("kompisen full")
-        return true
-    elseif kind == "pwrask" then
-        if msg[3] == "1" then
-            stopTaking("kompisen tar", false)
-            giving, givingFor = true, "ask"
-            log("ström: kompisen tar från mig")
-        elseif givingFor == "ask" then
-            stopGiving("kompisen slutade ta")
-        end
-        return true
-    elseif kind == "pwrstop" then
-        stopTaking("kompisen " .. tostring(msg[3]), false)
+        pending.inn = pending.inn + amount
         return true
     elseif kind == "pwrlvl" then
         peerLevel, peerMax = tonumber(msg[3]), tonumber(msg[4])

@@ -291,6 +291,17 @@ end
 function M.runsJob(m) return runsJobAt(m.actor) end
 
 -- The machine within radius of a location.
+-- Where the machines stand, for a quick distance check of many items at once.
+function M.positions()
+    if now() - lastScan >= SCAN_EVERY then scan() end
+    local out = {}
+    for _, m in ipairs(machines) do
+        local a = StaticFindObject(m.actor)
+        if a and a:IsValid() then out[#out + 1] = a:K2_GetActorLocation() end
+    end
+    return out
+end
+
 function M.nearMachine(loc, radius)
     if now() - lastScan >= SCAN_EVERY then scan() end
     for _, m in ipairs(machines) do

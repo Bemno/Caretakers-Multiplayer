@@ -1344,6 +1344,74 @@ local function diagnose(t, dt, luaMs)
     end
 end
 
+-- Airborne on a boat (the user 2026-11-22: walking over items on the deck of a moving
+-- boat slid the character backwards at the boat's speed). In the air the engine lets
+-- go of the base and keeps the base's velocity, but that is zero for the hull the mod
+-- places every frame (follower) and for pieces fastened without physics (both games):
+-- every jump or step off an item left the character behind, 2.6 m per jump at 5 m/s
+-- on the bench. While falling after standing on a boat the mod carries the character
+-- with the boat's movement each frame, and the engine's own velocity hand-over is off
+-- while based on a boat so it is not counted twice where the hull does move.
+local MOVE_WALKING, MOVE_FALLING = 1, 3
+local CARRY_MAX_DIST = 3000
+local carry = { key = nil, loc = nil, rot = nil, frames = 0, dist = 0 }
+local impartFor, impartOn, carryFailed
+
+local function endCarry()
+    if carry.frames > 5 then
+        log("luftburen på båten: %d bildrutor, buren %.0f cm", carry.frames, carry.dist)
+    end
+    carry.key, carry.frames, carry.dist = nil, 0, 0
+end
+
+local function boatUnder(pawn)
+    local base = pawn.BasedMovement.MovementBase
+    if not (base and base:IsValid()) then return nil end
+    local owner = base:GetOwner()
+    for _ = 1, 5 do
+        if not (owner and owner:IsValid()) then return nil end
+        if M.isBoat(owner) then return owner end
+        owner = owner:GetAttachParentActor()
+    end
+end
+
+local function setImpart(cm, addr, on)
+    if impartFor == addr and impartOn == on then return end
+    impartFor, impartOn = addr, on
+    cm.bImpartBaseVelocityX, cm.bImpartBaseVelocityY, cm.bImpartBaseVelocityZ = on, on, on
+end
+
+local function carryAirborne()
+    local pawn = localPC().Pawn
+    if not (pawn and pawn:IsValid()) or M.isBoat(pawn) then endCarry() return end
+    local cm = pawn.CharacterMovement
+    if not (cm and cm:IsValid()) then endCarry() return end
+    local mode = cm.MovementMode
+    local addr = pawn:GetAddress()
+    if mode == MOVE_WALKING then
+        local b = boatUnder(pawn)
+        setImpart(cm, addr, b == nil)
+        endCarry()
+        if b then carry.key, carry.loc, carry.rot = keyOf(b), b:K2_GetActorLocation(), b:K2_GetActorRotation() end
+        return
+    end
+    if mode ~= MOVE_FALLING or not carry.key then endCarry() return end
+    local b = M.find(carry.key)
+    if not b then endCarry() return end
+    local kml = UEHelpers.GetKismetMathLibrary()
+    local one = { X = 1, Y = 1, Z = 1 }
+    local old = kml:MakeTransform(carry.loc, carry.rot, one)
+    local l, r = b:K2_GetActorLocation(), b:K2_GetActorRotation()
+    local p = pawn:K2_GetActorLocation()
+    local rel = kml:InverseTransformLocation(old, p)
+    if math.abs(rel.X) > CARRY_MAX_DIST or math.abs(rel.Y) > CARRY_MAX_DIST then endCarry() return end
+    local dest = kml:TransformLocation(kml:MakeTransform(l, r, one), rel)
+    carry.loc, carry.rot = l, r
+    pawn:K2_SetActorLocation(dest, true, {}, false)
+    carry.frames = carry.frames + 1
+    carry.dist = carry.dist + math.sqrt((dest.X - p.X) ^ 2 + (dest.Y - p.Y) ^ 2)
+end
+
 -- Other modules that move things every frame (npc.lua).
 local frameCallbacks = {}
 function M.addFrame(fn) frameCallbacks[#frameCallbacks + 1] = fn end
@@ -1448,6 +1516,12 @@ local function onFrame(fromHook)
     local okT, errT = pcall(limitTilt)
     if not okT then log("båt-lutningsfel: %s", tostring(errT)) end
     if M.trap then pcall(trapStore) end
+    local okA, errA = pcall(carryAirborne)
+    if not okA then
+        if not carryFailed then log("båt-luftfel: %s", tostring(errA)) end
+        carryFailed = true
+        carry.key, carry.frames, carry.dist = nil, 0, 0
+    end
     local parts = partCost
     parts[1] = (parts[1] or 0) + (c1 - c0)
     parts[2] = (parts[2] or 0) + (os.clock() - c1)

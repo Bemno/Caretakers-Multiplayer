@@ -7,6 +7,7 @@
 local M = {}
 local T = require("text")
 local net = require("net")
+local bugreport = require("bugreport")
 local UEHelpers = require("UEHelpers")
 
 local BTN_CLASS = "/Game/UI/Focusable/BP_FocusableButton.BP_FocusableButton_C"
@@ -15,6 +16,9 @@ local WBL = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local RF_CLASS_DEFAULT = 0x10
 local VISIBLE, COLLAPSED = 0, 1
 local MAX_LIST = 6
+-- release.lua is written by package.py; a source install has none.
+local okRelease, RELEASE = pcall(require, "release")
+if not okRelease then RELEASE = "dev" end
 
 local lobby, log, localPC, friends
 local page = "main"
@@ -23,6 +27,7 @@ local selectedFriend     -- friend id chosen in the friend list
 local draft = ""         -- text in the name box; kept when the page is redrawn
 local boxAddr            -- the name box, when the page has one
 local focusBox = false
+local reportWhich, reportBack = "last", "mp"
 local ours = {}          -- address -> action (false for the status line)
 local origVis = {}       -- address of a game button -> its visibility
 local renderedFor, renderedSig = nil, nil
@@ -165,6 +170,9 @@ local function entries()
         if lobby.canCancel() then add(T("cancel"), function() lobby.cancelJoin() page = "mp" end) end
         return e
     end
+    local function openReport(which, back)
+        return function() draft, reportWhich, reportBack = "", which, back bugreport.reset() page = "report" end
+    end
     if page == "main" then
         add(T("multiplayer"), function() page = "mp" lobby.refresh() end)
         return e
@@ -204,7 +212,21 @@ local function entries()
         add(T("join_ip"), function() draft = lobby.loadLastIp() page = "joinip" end)
         local reqs = #friends.requests()
         add(reqs > 0 and T("friends_req", reqs) or T("friends"), function() draft = "" page = "friendlist" end)
+        if not bugreport.disabled() then
+            local which = bugreport.which()
+            local label = which == "now" and "report_bug" or bugreport.pendingCrash and "report_crash" or "report_last"
+            add(T(label), openReport(which, "mp"))
+        end
         add(T("back"), go("main"))
+        add(RELEASE, false)
+    elseif page == "report" then
+        box("report_hint", 200)
+        if bugreport.status() ~= "" then add(bugreport.status(), false) end
+        if bugreport.canSend() then add(T("send"), function() bugreport.send(reportWhich, typedName()) end) end
+        if reportWhich == "last" and bugreport.pendingCrash then
+            add(T("dont_send"), function() bugreport.dismiss() page = "mp" end)
+        end
+        add(T("back"), go(reportBack))
     elseif page == "playername" then
         box("player_hint", 30)
         add(T("save_name"), function() if lobby.setPlayerName(typedName()) then page = "mp" end end)

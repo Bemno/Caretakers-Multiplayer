@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.15 — 2026-11-24
+
+Bug reports from inside the game, a smoother game for both players and a round of sync fixes. Still a beta for 2 players; feedback is very welcome.
+
+- Report a multiplayer bug straight from the Esc menu, also after a crash.
+- Less stutter: the mod does much less work per frame, especially in new areas, among swarms and while building.
+- Fuel and power lines: the flow direction set with F is the same for both players.
+- Boxes can be moved with F and hung on walls by both players.
+- The boat's phone rings once for both; whoever answers takes the call.
+- Weapons picked up with a short E stay weapons, ammo included.
+- Power between the players charges smoothly.
+
 ## 0.2.14 — 2026-11-22
 
 Hotfix for mooring and the other player's movement. Still a beta for 2 players; feedback is very welcome.

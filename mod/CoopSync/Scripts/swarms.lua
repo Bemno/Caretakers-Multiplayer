@@ -36,6 +36,8 @@ local PENDING_SECONDS = 30    -- a copy waiting for its template gives up
 local DRIFT = 1500            -- cm a copy may be off before it is made again
 local REMAKE_GAP = 5          -- seconds between remakes of one copy
 local POS_BATCH = 40
+local POS_PER_SCAN = 100
+local posTurn = 0
 local CAUSED_RADIUS = 1000    -- a guest's own new particle this near it was its doing
 -- A stopped spawner still refills when one of its creatures dies (not on
 -- tick): the guest's refill counted as its doing, the host made a real one
@@ -178,13 +180,21 @@ local function hostScan(h)
             net.send("swd", tostring(k))
         end
     end
+    -- Reading every particle each scan made 30-40 ms stalls among large swarms
+    -- (2026-11-24): over POS_PER_SCAN they take turns.
+    local n = 0
+    for _ in pairs(near) do n = n + 1 end
+    local parts = math.max(1, math.ceil(n / POS_PER_SCAN))
+    posTurn = (posTurn + 1) % parts
     local batch = {}
     for k in pairs(near) do
-        pcall(function()
-            local l = h:GetParticle(k).Location
-            batch[#batch + 1] = string.format("%d=%.0f,%.0f,%.0f", k, l.X, l.Y, l.Z)
-        end)
-        if #batch >= POS_BATCH then net.send("swp", table.concat(batch, ";")) batch = {} end
+        if k % parts == posTurn then
+            pcall(function()
+                local l = h:GetParticle(k).Location
+                batch[#batch + 1] = string.format("%d=%.0f,%.0f,%.0f", k, l.X, l.Y, l.Z)
+            end)
+            if #batch >= POS_BATCH then net.send("swp", table.concat(batch, ";")) batch = {} end
+        end
     end
     if #batch > 0 then net.send("swp", table.concat(batch, ";")) end
 end

@@ -10,6 +10,7 @@ import socket
 import sys
 import time
 
+import report
 import saves
 import social
 import transfer
@@ -41,6 +42,30 @@ def process_alive(pid):
     k.GetExitCodeProcess(h, ctypes.byref(code))
     k.CloseHandle(h)
     return code.value == 259  # STILL_ACTIVE
+
+
+def open_game(pid=None):
+    """Handle to the game, kept open so its exit code can be read after it ends."""
+    import ctypes
+    import subprocess
+    if pid is None:
+        out = subprocess.run(["tasklist", "/FI", f"IMAGENAME eq {GAME_EXE}", "/NH", "/FO", "CSV"], capture_output=True,
+                             encoding="mbcs", errors="replace", text=True, creationflags=0x08000000).stdout
+        fields = [line.split('","') for line in out.splitlines() if GAME_EXE.lower() in line.lower()]
+        if not fields:
+            return None
+        pid = int(fields[0][1])
+    k = ctypes.windll.kernel32
+    k.OpenProcess.restype = ctypes.c_void_p
+    return k.OpenProcess(0x1000, False, pid) or None  # PROCESS_QUERY_LIMITED_INFORMATION
+
+
+def game_exit_code(handle):
+    import ctypes
+    code = ctypes.c_ulong()
+    if not ctypes.windll.kernel32.GetExitCodeProcess(ctypes.c_void_p(handle), ctypes.byref(code)) or code.value == 259:
+        return None
+    return code.value
 
 
 def left_mouse_down():
@@ -150,6 +175,7 @@ class Bridge:
         self.social = social.Social()
         self.social.peer_fn = lambda: self.game.peer_id() if hasattr(self.game, "peer_id") else None
         self.updater = None
+        self.reporter = report.Sender(report.load_webhook(), report.Paths(io_dir, os.environ.get("LOCALAPPDATA", "")), time.time())
 
     def to_lua(self, lines):
         with open(self.in_path, "ab") as f:
@@ -294,6 +320,9 @@ class Bridge:
             if self.updater:
                 self.updater.command(line.decode("utf-8").split("|")[2:])
             return
+        if line.startswith(b"report|"):
+            self.reporter.command(line.decode("utf-8").split("|")[2:])
+            return
         if line.startswith(b"save|"):
             self.to_lua([r.encode("utf-8") for r in self.save_command(line.decode("utf-8").split("|")[2:])])
             return
@@ -375,6 +404,7 @@ class Bridge:
             lua_lines.extend(self.link.take_events())
         if self.updater:
             lua_lines.extend(self.updater.take_events())
+        lua_lines.extend(self.reporter.take_events())
         if self.lan:
             self.lan.tick()
             lua_lines.extend(e.encode("utf-8") for e in self.lan.take_events())
@@ -399,6 +429,19 @@ def main():
         args.dll = os.path.abspath(args.dll)
 
     os.makedirs(args.dir, exist_ok=True)
+    if not args.udp:
+        # Started with start /B its output went nowhere; the bench redirects it itself.
+        log_path = os.path.join(args.dir, "coopnet.log")
+        try:
+            if os.path.exists(log_path):
+                os.replace(log_path, os.path.join(args.dir, "coopnet.prev.log"))
+            sys.stdout = sys.stderr = open(log_path, "w", encoding="utf-8", buffering=1)
+        except OSError:
+            pass  # held by a coopnet that has not quit yet; the log is a help, not a need
+    try:
+        game = open_game(args.gamepid)
+    except (OSError, ValueError, IndexError):
+        game = None
     with open(os.path.join(args.dir, "coopnet.pid"), "w") as f:
         f.write(str(os.getpid()))
     leftover = saves.Saves(args.savedir).recover_leftover() if os.path.isdir(args.savedir) else []
@@ -423,6 +466,14 @@ def main():
         print(f"coopnet: LAN saknas: {e}", flush=True)
     bridge = Bridge(args.dir, link, args.savedir, lan=lan_link)
     bridge.to_lua(link.hello_lines())
+    try:
+        if report.recover_unsaved(bridge.reporter.paths):
+            print("coopnet: förra körningen sparades aldrig, last byggd av prev-loggarna", flush=True)
+    except OSError as e:
+        print(f"coopnet: förra körningens loggar gick inte att spara: {e}", flush=True)
+    pending = bridge.reporter.pending() if bridge.reporter.webhook else b"report|0|disabled"
+    if pending:
+        bridge.to_lua([pending])
     # Next to the built exe: <mod>\coopnet\coopnet.exe; the source folder has no update.ini.
     # UDP is the bench and Spelstartare's split screen, where player 2 runs from a
     # mirror (H:\TLC-sp2): an update there would install into the mirror.
@@ -441,7 +492,15 @@ def main():
                 f.write(str(int(time.time())))
             gone = (args.gamepid and not process_alive(args.gamepid)) or (args.watchgame and not game_running())
             if gone:
+                code = game_exit_code(game) if game else None
+                r = bridge.reporter
+                try:
+                    info = report.snapshot(r.paths, r.paths.last_dir, r.session_start, code, sorted(r.names))
+                    print(f"coopnet: sessionen sparad i {r.paths.last_dir} (krasch: {'ja' if info['crashed'] else 'nej'}, exitkod {code})", flush=True)
+                except OSError as e:
+                    print(f"coopnet: sessionen gick inte att spara: {e}", flush=True)
                 bridge.saves.recover_leftover()
+                r.wait(60)
                 print("coopnet: spelet har stängts, avslutar", flush=True)
                 bridge.updater.install()
                 return

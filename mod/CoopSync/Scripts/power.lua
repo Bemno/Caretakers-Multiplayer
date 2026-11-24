@@ -418,6 +418,94 @@ local function stretchedOff(c, key, a, b)
     return ok
 end
 
+-- F on a socket (a tank's in/out/balance) is VoyageModuleComponent:
+-- SocketInteractAction, and the mode lives inside the module, not in the
+-- cable: each game pumped diesel its own way (2026-11-23). The press is
+-- repeated in the other game; both load the same world, so the modes start
+-- equal and step alike.
+local SOCKET_ACT_FN = "/Script/Voyage.VoyageModuleComponent:SocketInteractAction"
+local MODULE_CLASS = "/Script/Voyage.VoyageModuleComponent"
+local socketActHooked, applyingSocketAct = false, false
+
+-- F on a fuel or power cable sets its DirectionA/DirectionB (0 balance, 1 in,
+-- 2 out per end) through ModuleSocketComponent:SetSocketDirectionType, natively
+-- (no hookable function runs); unsynced, diesel flowed the other way in the other game and
+-- the two fought over the tank levels (2026-11-24). Sent with the socket at A,
+-- since a copy may have its ends the other way round.
+local dirStates = {}            -- key -> "A,B" as last read, sent or applied
+
+local function readDir(c)
+    return tostring(c.DirectionA) .. "," .. tostring(c.DirectionB)
+end
+
+local function onBody(a, b) return a:sub(1, 1) == "@" or b:sub(1, 1) == "@" end
+
+local function pollDir(c, key, a, b, first)
+    -- A cable in a player is peerpower's (pwrmode, its ends turn round).
+    if onBody(a, b) then return end
+    local okD, d = pcall(readDir, c)
+    if not okD then return end
+    local prev = dirStates[key]
+    dirStates[key] = d
+    if first or not prev or prev == d then return end
+    -- The game sets some cables itself in the first seconds after loading;
+    -- sent, that overwrote the other game's own state.
+    if not baselineAt or now() - baselineAt < LOAD_GRACE then return end
+    local da, db = d:match("^(%d+),(%d+)$")
+    if not da then return end
+    net.send("cdir", key, a, da, db)
+    log("kabel %s: riktning %s -> %s, skickas", key, prev, d)
+end
+
+local function sendDir(c, key, a, b)
+    if onBody(a, b) then return end
+    local okD, d = pcall(readDir, c)
+    if not okD then return end
+    local da, db = d:match("^(%d+),(%d+)$")
+    if da then net.send("cdir", key, a, da, db) end
+end
+
+local function onSocketAct(ctx, sockParam, charParam)
+    if applyingSocketAct then return end
+    local char = charParam:get()
+    local pawn = localPC().Pawn
+    if not (char and char:IsValid() and pawn and pawn:IsValid() and char:GetAddress() == pawn:GetAddress()) then return end
+    local sock = sockParam:get()
+    local key = keyOf(ctx:get():GetOwner())
+    net.send("sockact", key, sock:GetFName():ToString())
+    log("uttag %s#%s: läge bytt med F", key, sock:GetFName():ToString())
+end
+
+local function hookSocketAct()
+    if socketActHooked then return end
+    socketActHooked = true
+    local ok, err = pcall(RegisterHook, SOCKET_ACT_FN, function(ctx, s, c)
+        local okA, errA = pcall(onSocketAct, ctx, s, c)
+        if not okA then log("uttagsläge-fel: %s", tostring(errA)) end
+    end)
+    log("uttagsläge (F): %s", ok and "ok" or tostring(err))
+end
+
+local function handleSocketAct(msg)
+    local key, name = msg[3], msg[4]
+    local actor = resolve(key)
+    local m = actor and actor:GetComponentByClass(StaticFindObject(MODULE_CLASS))
+    local pawn = localPC().Pawn
+    if not (m and m:IsValid() and pawn and pawn:IsValid()) then log("uttag %s: finns inte här", tostring(key)) return end
+    for _, e in ipairs(actor:K2_GetComponentsByClass(StaticFindObject(SOCKET_CLASS)) or {}) do
+        local c = e
+        pcall(function() c = e:get() end)
+        if c:GetFName():ToString() == name then
+            applyingSocketAct = true
+            local ok, err = pcall(function() m:SocketInteractAction(c, pawn) end)
+            applyingSocketAct = false
+            log("uttag %s#%s: läge bytt av den andra: %s", key, name, ok and "ok" or tostring(err))
+            return
+        end
+    end
+    log("uttag %s#%s: uttaget finns inte här", key, name)
+end
+
 local function pollCables()
     if now() - lastPoll < CABLE_POLL_SECONDS or #pendingCables > 0 then return end
     lastPoll = now()
@@ -451,6 +539,7 @@ local function pollCables()
             local okL, len = pcall(function() return c.Cable.CableLength end)
             local st = a .. "|" .. b .. "|" .. (okL and math.floor((len or 0) / 50) or 0)
             states[key] = st
+            pollDir(c, key, a, b, first)
             local prev = not first and cableStates[key]
             if not first and not prev and ((emptiedAt[a] and now() - emptiedAt[a] < RETURN_SECONDS)
                 or (emptiedAt[b] and now() - emptiedAt[b] < RETURN_SECONDS)) then
@@ -597,13 +686,45 @@ local givenAway = {}        -- key -> until time; late messages about it are ign
 
 local INV_CLASS = "/Script/Voyage.VoyageBaseInventoryComponent"
 
--- Stored electricity: each game ran its own power, and the guest's boat
+-- Stored resources: each game ran its own power, and the guest's boat
 -- battery stood empty while the host's had 272 (2026-11-15), so nothing on the
--- guest's boat had power. The host sends the charge of the modules near either
--- player and the guest's modules are topped up or drained to it.
+-- guest's boat had power. The host sends what the modules near either player
+-- hold and the guest's modules are topped up or drained to it. Electricity
+-- (type 0) only; diesel, water, oxygen and the rest were never sent, and a
+-- half-full tank showed different levels (user 2026-11-22).
+-- Both games burn fuel alike (bench: 22 diesel in 30 s in both), so for the
+-- other types the side that changed a tank more since the last agreed level
+-- (pumping, filling) wins; the guest sends its level back to the host then.
 local MODULE_CLASS = "/Script/Voyage.VoyageModuleComponent"
 local CHARGE_SECONDS, CHARGE_RADIUS, CHARGE_BATCH = 2, 6000, 25
 local lastCharge, chargeSent = -100, {}
+local typesOf = {}   -- module key -> resource types with a capacity (fixed per module)
+local agreed = {}    -- guest: "key|type" -> level both games last had
+
+local function resourceTypes(key, m)
+    local t = typesOf[key]
+    if t then return t end
+    t = {}
+    for i = 0, 31 do
+        local okM, max = pcall(function() return m:GetMaxResourceAmount(i) end)
+        if okM and max and max > 0 then t[#t + 1] = i end
+    end
+    typesOf[key] = t
+    return t
+end
+
+local function setLevel(m, t, want)
+    local d = want - m:GetTotalResourcesAmountForType(t)
+    if math.abs(d) < math.max(1, want * 0.02) then return end
+    if t == 0 then
+        if d > 0 then m:ForceAddResource(0, d) else m:RemoveResource(0, -d, 2) end
+    elseif d > 0 then
+        m:ForceAddResource(t, d)
+    else
+        -- AddResource takes a negative amount exactly (RemoveResource lagged, arkiv).
+        m:AddResource(t, d)
+    end
+end
 
 local function sendCharges()
     if now() - lastCharge < CHARGE_SECONDS then return end
@@ -633,28 +754,74 @@ local function sendCharges()
                 if (c.X - l.X) ^ 2 + (c.Y - l.Y) ^ 2 + (c.Z - l.Z) ^ 2 < CHARGE_RADIUS ^ 2 then near = true break end
             end
             if not near or a:IsA(character) or m:GetFullName():find("Default__", 1, true) then return end
-            local amount = m:GetTotalResourcesAmountForType(0)
             local key = keyOf(a)
-            if amount <= 0 and not (chargeSent[key] and chargeSent[key] > 0) then return end
-            chargeSent[key] = amount
-            batch[#batch + 1] = key .. "=" .. string.format("%.1f", amount)
+            local parts, any = {}, false
+            for _, t in ipairs(resourceTypes(key, m)) do
+                local amount = m:GetTotalResourcesAmountForType(t)
+                local k = key .. "|" .. t
+                if amount > 0 or (chargeSent[k] and chargeSent[k] > 0) then
+                    chargeSent[k] = amount
+                    parts[#parts + 1] = string.format("%d:%.1f", t, amount)
+                    any = true
+                end
+            end
+            if not any then return end
+            batch[#batch + 1] = key .. "=" .. table.concat(parts, ",")
             if #batch >= CHARGE_BATCH then flush() end
         end)
     end
     flush()
 end
 
+-- A module the host has and this game has not (not streamed in here) sent
+-- every 2 s made a scan of every saved object each time (75 ms, 2026-11-24);
+-- one not found is left alone for a while.
+local MISS_SECONDS = 30
+local chargeMiss = {}  -- key -> time it was not found
+
 local function receiveCharges(msg)
     local cls = StaticFindObject(MODULE_CLASS)
-    for key, v in (msg[3] or ""):gmatch("([^;=]+)=([%d%.%-]+)") do
+    local back = {}
+    for key, list in (msg[3] or ""):gmatch("([^;=]+)=([^;]+)") do
+        pcall(function()
+            if chargeMiss[key] and now() - chargeMiss[key] < MISS_SECONDS then return end
+            local a = resolve(key)
+            local m = a and a:GetComponentByClass(cls)
+            if not (m and m:IsValid()) then chargeMiss[key] = now() return end
+            chargeMiss[key] = nil
+            for ts, v in list:gmatch("(%d+):([%d%.%-]+)") do
+                local t, host = tonumber(ts), tonumber(v)
+                local k = key .. "|" .. t
+                local mine, was = m:GetTotalResourcesAmountForType(t), agreed[k]
+                local tol = math.max(1, host * 0.02)
+                if t ~= 0 and was and math.abs(mine - was) > math.abs(host - was) + tol then
+                    agreed[k] = mine
+                    back[#back + 1] = string.format("%s=%d:%.1f", key, t, mine)
+                    log("nivå %s typ %d ändrad här: %.1f -> %.1f (värden %.1f), skickas", key, t, was, mine, host)
+                else
+                    setLevel(m, t, host)
+                    agreed[k] = host
+                end
+            end
+        end)
+    end
+    if #back > 0 then net.send("chargeback", table.concat(back, ";")) end
+end
+
+-- Host: levels the guest changed itself.
+local function receiveChargeBack(msg)
+    local cls = StaticFindObject(MODULE_CLASS)
+    for key, list in (msg[3] or ""):gmatch("([^;=]+)=([^;]+)") do
         pcall(function()
             local a = resolve(key)
             local m = a and a:GetComponentByClass(cls)
             if not (m and m:IsValid()) then return end
-            local want = tonumber(v)
-            local d = want - m:GetTotalResourcesAmountForType(0)
-            if math.abs(d) < math.max(1, want * 0.02) then return end
-            if d > 0 then m:ForceAddResource(0, d) else m:RemoveResource(0, -d, 2) end
+            for ts, v in list:gmatch("(%d+):([%d%.%-]+)") do
+                local t, want = tonumber(ts), tonumber(v)
+                local cur = m:GetTotalResourcesAmountForType(t)
+                setLevel(m, t, want)
+                log("nivå %s typ %d från gästen: %.1f -> %.1f", key, t, cur, m:GetTotalResourcesAmountForType(t))
+            end
         end)
     end
 end
@@ -796,8 +963,8 @@ local function applyCable(cable, key, sockA, sockB, class, maxLen, len)
     -- Unplugging through the game (ReleaseSocketCable) reels the cable into
     -- this player's inventory, so it is never used here.
     if (hereA ~= "-" and hereA ~= sockA) or (hereB ~= "-" and hereB ~= sockB) then
-        if localId and localId ~= 0 then props.suppressGone(tostring(localId)) end
         if copies[tostring(localId)] then
+            if localId and localId ~= 0 then props.suppressGone(tostring(localId)) end
             -- Our copy of their cable: they unplugged an end and hold it, so
             -- the copy is re-created with only the end that is still in.
             cable:K2_DestroyActor()
@@ -805,7 +972,9 @@ local function applyCable(cable, key, sockA, sockB, class, maxLen, len)
             if sockA ~= "-" or sockB ~= "-" then spawnCopy(key, class or pathOf(cable:GetClass()), sockA, sockB, maxLen, len) end
         else
             -- Our own cable, unplugged by them through their copy (which the
-            -- game removes at once).
+            -- game removes at once). Its removal here is sent: a copy knocked
+            -- out of a socket by another cable stayed hanging in their game
+            -- (2026-11-24).
             giveAway(cable, key)
         end
         return
@@ -1059,6 +1228,35 @@ local function bodyEnd(sockKey)
     return sockKey
 end
 
+local dirWaiting = {}           -- key -> { msg, untilT }: direction for a cable not here yet
+
+local function handleDir(msg)
+    local key, theirA, da, db = msg[3], swapBodies(msg[4]), tonumber(msg[5]), tonumber(msg[6])
+    local c = resolve(key)
+    if not (da and db) then return end
+    if not (c and c:IsValid()) then
+        -- The host's snapshot arrives before the guest's world has its cables,
+        -- and before the world change that resets this module.
+        dirWaiting[key] = dirWaiting[key] or { msg = msg, untilT = now() + 60 }
+        return
+    end
+    dirWaiting[key] = nil
+    local okP, a, b = pcall(plugsOf, c)
+    if okP and onBody(a, b) then dirWaiting[key] = nil return end
+    if okP and theirA ~= "-" and b == theirA and a ~= theirA then da, db = db, da end
+    -- Written straight into DirectionA/B, the arrow and the pump animation
+    -- kept the old way; F sets them through the socket, the other end follows.
+    -- A loose end reports the plugged end's socket (see plugsOf).
+    local sa, sb = c:GetSocket(c.ConnectorMeshA), c:GetSocket(c.ConnectorMeshB)
+    if a == "-" then sa = nil end
+    if b == "-" then sb = nil end
+    if sa and sa:IsValid() and (da ~= 0 or db == 0 or not (sb and sb:IsValid())) then pcall(function() sa:SetSocketDirectionType(da) end)
+    elseif sb and sb:IsValid() then pcall(function() sb:SetSocketDirectionType(db) end) end
+    if c.DirectionA ~= da or c.DirectionB ~= db then c.DirectionA, c.DirectionB = da, db end
+    dirStates[key] = da .. "," .. db
+    log("kabel %s: riktning %d,%d från den andra", key, da, db)
+end
+
 local deferred = {}          -- key -> cable message held until the world has loaded
 -- key -> { msg, at }: the newest message for a cable whose copies hit the
 -- limit. Plugged and unplugged four times in 8 s, the guest's last plug never
@@ -1156,6 +1354,7 @@ local function sendSnapshot()
         local okA, a, b = pcall(plugsOf, c)
         if okK and okA and key:sub(1, 1) == "i" then
             sendCable(key, c, a, b)
+            sendDir(c, key, a, b)
             cablesSent = cablesSent + 1
         end
     end
@@ -1195,6 +1394,11 @@ function M.tick()
     worldSince = worldSince or now()
     if now() - worldSince < 0 then return end
     tryHookSwitch()
+    hookSocketAct()
+    for key, w in pairs(dirWaiting) do
+        if now() > w.untilT then dirWaiting[key] = nil log("kabel %s: riktning, kabeln kom aldrig", key)
+        else pcall(handleDir, w.msg) end
+    end
     local okR, errR = pcall(runRetries)
     if not okR then log("kabel-omförsök fel: %s", tostring(errR)) end
     if snapshotWanted then
@@ -1267,9 +1471,15 @@ M.findSocket, M.stateOf, M.keyOf, M.resolve = findSocket, stateOf, keyOf, resolv
 function M.handle(msg)
     if msg[1] == "switch" then handleSwitch(msg) return true end
     if msg[1] == "cable" then handleCable(msg) return true end
+    if msg[1] == "sockact" then handleSocketAct(msg) return true end
+    if msg[1] == "cdir" then handleDir(msg) return true end
     if msg[1] == "give" then receiveGive(msg) return true end
     if msg[1] == "charge" then
         if not isHost then receiveCharges(msg) end
+        return true
+    end
+    if msg[1] == "chargeback" then
+        if isHost then receiveChargeBack(msg) end
         return true
     end
     if msg[1] == "ready" then
@@ -1285,8 +1495,8 @@ function M.reset()
     quietSwitch, switchQueue, copies, applyingCable, pendingCables = {}, {}, {}, {}, {}
     cableStates, lastPoll, baselineAt, settling = nil, 0, nil, {}
     mooringCopies, mooringPlugged, emptiedAt, returned, lastMooringCheck = {}, {}, {}, {}, 0
-    follow, givenAway, lastCharge, chargeSent = {}, {}, -100, {}
-    goneEarly, consumedOf, looseInfo, retries = {}, {}, {}, {}
+    follow, givenAway, lastCharge, chargeSent, typesOf, agreed = {}, {}, -100, {}, {}, {}
+    goneEarly, consumedOf, looseInfo, retries, dirStates, chargeMiss = {}, {}, {}, {}, {}, {}
     spawnLog, skippedMooring, blockedEnds, deferred, limited = {}, {}, {}, {}, {}
     snapshotWanted, worldSince = false, nil
 end

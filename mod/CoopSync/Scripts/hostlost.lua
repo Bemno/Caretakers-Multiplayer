@@ -29,6 +29,8 @@ function M.heard()
     lastHeard = os.time()
 end
 
+function M.since() return os.time() - lastHeard end
+
 -- The host left on purpose.
 function M.hostBye()
     lastHeard = 0

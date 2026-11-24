@@ -8,6 +8,11 @@ PITCH_FIX = true
 function RotP(r) if not PITCH_FIX then return r and r.Pitch end return r and (r.pitch or r.Pitch) end
 function Rot(p, y, r) if not PITCH_FIX then return { Pitch = p, Yaw = y, Roll = r } end return { pitch = p, Pitch = p, Yaw = y, Roll = r } end
 
+-- The mod makes 1.5-3.5 MB of short-lived garbage a second; incremental
+-- collection stalled whichever module was running 30-50 ms in most 5 s
+-- windows. Generational: 3-4 windows in 30 (bench 2026-11-24).
+collectgarbage("generational")
+
 local UEHelpers = require("UEHelpers")
 local net = require("net")
 local spy = require("spy")
@@ -30,12 +35,12 @@ local ocean = require("ocean")
 local swarms = require("swarms")
 local npc = require("npc")
 local loading = require("loading")
-local rec = require("rec")
 local boxes = require("boxes")
 local machines = require("machines")
 local repair = require("repair")
 local vehicles = require("vehicles")
 local lamp = require("lamp")
+local phone = require("phone")
 local paint = require("paint")
 local gear = require("gear")
 local zap = require("zap")
@@ -46,6 +51,7 @@ local terminals = require("terminals")
 local peerinv = require("peerinv")
 local peerpower = require("peerpower")
 local text = require("text")
+local bugreport = require("bugreport")
 
 local function arg(cmdline, key)
     return cmdline:match("%-" .. key .. "=(%S+)")
@@ -63,6 +69,13 @@ local ioName = cmdRole or arg(cmdline, "coopIo") or "main"
 local role
 
 local logPath = "ue4ss/Mods/CoopSync/coopsync_" .. ioName .. ".log"
+-- Each start begins a new log. coopnet copies the last one to reports\<io>\last
+-- when the game closes; .prev.log is for a run that ended without that copy.
+do
+    local prev = logPath:gsub("%.log$", ".prev.log")
+    os.remove(prev)
+    os.rename(logPath, prev)
+end
 
 local function log(fmt, ...)
     local line = string.format(fmt, ...)
@@ -743,13 +756,13 @@ local function handle(msg)
     -- coopnet's own lines carry sequence 0; anything else came from the other game.
     if msg[2] ~= "0" then hostlost.heard() end
     if msg[1] == "hostbye" then hostlost.hostBye() return end
-    if menu.handle(msg) or friends.handle(msg) or lobby.handle(msg) then return end
+    if bugreport.handle(msg) or menu.handle(msg) or friends.handle(msg) or lobby.handle(msg) then return end
     if not role then return end
     if role == "guest" and not guestSettled() then
         if msg[1] ~= "pos" and #early < EARLY_MAX then early[#early + 1] = msg end
         return
     end
-    if doors.handle(msg) or swarms.handle(msg) or props.handle(msg) or drops.handle(msg) or paint.handle(msg) or gear.handle(msg) or zap.handle(msg, puppet) or drone.handle(msg) or power.handle(msg) or prog.handle(msg) or build.handle(msg) or boat.handle(msg) or weather.handle(msg) or npc.handle(msg) or rec.handle(msg) or boxes.handle(msg) or machines.handle(msg) or repair.handle(msg) or vehicles.handle(msg) or lamp.handle(msg) or mapicons.handle(msg) or terminals.handle(msg) or peerinv.handle(msg) or peerpower.handle(msg) or anim.handle(msg) then return end
+    if doors.handle(msg) or swarms.handle(msg) or props.handle(msg) or drops.handle(msg) or paint.handle(msg) or gear.handle(msg) or zap.handle(msg, puppet) or drone.handle(msg) or power.handle(msg) or prog.handle(msg) or build.handle(msg) or boat.handle(msg) or weather.handle(msg) or npc.handle(msg) or boxes.handle(msg) or machines.handle(msg) or repair.handle(msg) or vehicles.handle(msg) or lamp.handle(msg) or phone.handle(msg) or mapicons.handle(msg) or terminals.handle(msg) or peerinv.handle(msg) or peerpower.handle(msg) or anim.handle(msg) then return end
     local kind = msg[1]
     if kind == "pos" then
         local s = tonumber(msg[2])
@@ -884,6 +897,7 @@ local worldModules = {
     { "repair", function() return repair.tick() end, "lagnings-fel" },
     { "vehicles", function() return vehicles.tick() end, "fordons-fel" },
     { "lamp", function() return lamp.tick() end, "lamp-fel" },
+    { "phone", function() return phone.tick() end, "telefon-fel" },
     { "paint", function() return paint.tick() end, "färg-fel" },
     { "gear", function() return gear.tick() end, "utrustning-fel" },
     { "mapicons", function() return mapicons.tick() end, "karta-fel" },
@@ -904,7 +918,6 @@ local function tick()
         friends.setActive(false)
     end
     spy.tick()
-    if rec.active then timed("rec", rec.tick) end
     timed("nät", pumpNet)
     timed("nivånamn", levelName)
     if not role then return end
@@ -915,7 +928,7 @@ local function tick()
         props.reset() power.reset() drops.reset() doors.reset() prog.reset()
     end
     if levelName() == "Empty" then settledAt, calmSince, lastTickAt = nil, nil, nil end
-    if levelName() == "Empty" then worldSince = nil posReady, posBuf = false, {} death.reset() inv.reset() build.reset() boat.reset() weather.reset() ocean.reset() swarms.reset() npc.reset() loading.reset() boxes.reset() machines.reset() repair.reset() vehicles.reset() lamp.reset() paint.reset() gear.reset() zap.reset() drone.reset() mapicons.reset() terminals.reset() peerinv.reset() peerpower.reset() hostlost.reset() return end
+    if levelName() == "Empty" then worldSince = nil posReady, posBuf = false, {} death.reset() inv.reset() build.reset() boat.reset() weather.reset() ocean.reset() swarms.reset() npc.reset() loading.reset() boxes.reset() machines.reset() repair.reset() vehicles.reset() lamp.reset() phone.reset() paint.reset() gear.reset() zap.reset() drone.reset() mapicons.reset() terminals.reset() peerinv.reset() peerpower.reset() hostlost.reset() return end
     worldSince = worldSince or realTime()
     updateSettle()
     if role == "guest" and levelName() == "VoyageWorld2" then
@@ -988,6 +1001,7 @@ drops.init(net, log, localPC, realTime, props)
 local npcFrameAdded = false
 local function setRole(r)
     role = r
+    bugreport.inWorld = true
     props.isHost = r == "host"
     power.init(net, log, localPC, realTime, props, console, r == "host", function() return puppet end)
     boat.init(net, log, localPC, realTime, r == "host")
@@ -1006,7 +1020,6 @@ local function setRole(r)
     repair.init(net, log, localPC, realTime, props, boxes)
     terminals.init(net, log, realTime, boxes, props)
     -- Recording (F7) is a test bench tool: only with a role from the command line.
-    if cmdRole then rec.init(log, localPC, net, r == "host", ioName) rec.active = true end
     log("roll: %s", r)
 end
 lobby.init(net, log, levelName, setRole, ioName)
@@ -1018,6 +1031,7 @@ hostlost.init(log, localPC, lobby)
 menu.init(lobby, log, localPC, friends)
 death.init(log, localPC, function() return puppet end)
 pausemenu.init(log, localPC, lobby)
+bugreport.init(log)
 prog.init(net, log, localPC, realTime)
 inv.init(log, localPC, lobby, ioName, props)
 build.init(net, log, realTime, props, console, localPC)
@@ -1029,6 +1043,7 @@ peerinv.init(net, log, localPC, realTime, boxes, console, function() return pupp
 boxes.skip = peerinv.isPuppetBox
 peerpower.init(net, log, localPC, realTime, function() return puppet end, peerinv, text, console)
 lamp.init(net, log, localPC, realTime, console, function() return puppet end)
+phone.init(net, log, realTime, function() return role == "host" end)
 anim.init(net, log)
 paint.init(net, log, realTime, function() return role == "host" end)
 gear.init(net, log, localPC, realTime, function() return puppet end)
@@ -1061,12 +1076,12 @@ Coop = {
     death = death,
     boat = boat,
     world = function() return localPC():GetWorld() end,
-    rec = rec,
     boxes = boxes,
     machines = machines,
     repair = repair,
     vehicles = vehicles,
     lamp = lamp,
+    phone = phone,
     peerpower = peerpower,
 }
 -- Test engine: testbank2.ps1 kör drops io/<role>/cmd.lua into the running game

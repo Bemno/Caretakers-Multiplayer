@@ -5,8 +5,10 @@
 -- the one that counts.
 local M = {}
 local T = require("text")
+local bugreport = require("bugreport")
 
 local BTN_CLASS = "/Game/UI/Focusable/BP_FocusableButton.BP_FocusableButton_C"
+local BOX_CLASS = "/Game/UI/Focusable/BP_FocusableTextBox.BP_FocusableTextBox_C"
 local WBL = "/Script/UMG.Default__WidgetBlueprintLibrary"
 local RF_CLASS_DEFAULT = 0x10
 local VISIBLE, COLLAPSED = 0, 1
@@ -22,6 +24,7 @@ local page = "main"
 local made = {}          -- address -> true for every button the mod put in the panel
 local hidden = {}        -- address -> visibility of a game button hidden on the list page
 local listSig
+local boxAddr, focusBox     -- the report text box, while the report page is open
 local SLOTS = 10
 
 -- The menu sits inside the game's overlay widget, so it is never "in the
@@ -104,6 +107,8 @@ local function labelOf(action)
     if action == "save" then return saveLabel() end
     if action == "load" then return T("load_list") end
     if action == "back" then return T("back") end
+    if action == "report" then return T("report_bug") end
+    if action == "send" then return bugreport.status() ~= "" and bugreport.status() or T("send") end
     local empty = tonumber(action:match("^e:(%d+)$"))
     if empty then return T("slot", empty, T("empty")) end
     local name = action:match("^w:(.*)$") or action
@@ -121,7 +126,7 @@ local function removeMade(panel)
     for _, w in ipairs(children(panel)) do
         if made[w:GetAddress()] then panel:RemoveChild(w) end
     end
-    made, ours = {}, {}
+    made, ours, boxAddr, focusBox = {}, {}, nil, false
 end
 
 local function restoreHidden(panel)
@@ -153,20 +158,20 @@ local function change(menu)
     page = "main"
     save:SetVisibility(COLLAPSED)
     pcall(function() menu.LoadFromFileBtn:SetVisibility(COLLAPSED) end)
-    if lobby.role() ~= "host" then return end
+    local actions = lobby.role() == "host" and { "save", "load", "report" } or { "report" }
     local tail, moving = {}, false
     for _, w in ipairs(children(panel)) do
         if w:GetAddress() == save:GetAddress() then moving = true end
         if moving then tail[#tail + 1] = { w = w, slot = slotOf(w) } end
     end
     for _, t in ipairs(tail) do panel:RemoveChild(t.w) end
-    for _, action in ipairs({ "save", "load" }) do addButton(menu, panel, action, slotOf(menu.ContinueBtn)) end
+    for _, action in ipairs(actions) do addButton(menu, panel, action, slotOf(menu.ContinueBtn)) end
     for _, t in ipairs(tail) do applySlot(panel:AddChild(t.w), t.slot) end
 end
 
 -- The ten multiplayer slots as on the Host page (user 2026-11-21): a slot's
--- world is loaded, an empty slot does nothing here (a new world is made from
--- the title screen). Other named worlds are not listed.
+-- world is loaded, an empty slot makes a new world there (user 2026-11-23).
+-- Other named worlds are not listed.
 local function worldList()
     local byNo = {}
     for _, w in ipairs(lobby.worlds) do
@@ -178,20 +183,55 @@ local function worldList()
     return out
 end
 
-local function showList(menu)
-    local panel = menu.SaveBtn:GetParent()
-    local slot = slotOf(menu.ContinueBtn)
-    removeMade(panel)
+local function hideAll(panel)
     for _, w in ipairs(children(panel)) do
         local a = w:GetAddress()
         if hidden[a] == nil then hidden[a] = w:GetVisibility() end
         w:SetVisibility(COLLAPSED)
     end
+end
+
+local function showList(menu)
+    local panel = menu.SaveBtn:GetParent()
+    local slot = slotOf(menu.ContinueBtn)
+    removeMade(panel)
+    hideAll(panel)
     local entries = worldList()
     for _, action in ipairs(entries) do addButton(menu, panel, action, slot) end
     addButton(menu, panel, "back", slot)
     listSig = table.concat(entries, "|")
     page = "list"
+end
+
+-- A text box and Send: the report covers this session from both games.
+local function showReport(menu)
+    local panel = menu.SaveBtn:GetParent()
+    local slot = slotOf(menu.ContinueBtn)
+    removeMade(panel)
+    hideAll(panel)
+    local box = StaticFindObject(WBL):Create(menu, StaticFindObject(BOX_CLASS), localPC())
+    if box and box:IsValid() then
+        pcall(function() box.MaxTextLength = 200 end)
+        applySlot(panel:AddChild(box), slot)
+        pcall(function() box:SetHintText(FText(T("report_hint"))) end)
+        box:SetVisibility(VISIBLE)
+        made[box:GetAddress()] = true
+        boxAddr, focusBox = box:GetAddress(), true
+    end
+    for _, action in ipairs({ "send", "back" }) do addButton(menu, panel, action, slot) end
+    page = "report"
+end
+
+local function reportBox(menu)
+    for _, w in ipairs(children(menu.SaveBtn:GetParent())) do
+        if w:GetAddress() == boxAddr then return w end
+    end
+end
+
+local function typedReport(menu)
+    local w = reportBox(menu)
+    local ok, text = pcall(function() return w.EditableTextBox:GetText():ToString() end)
+    return ok and text or ""
 end
 
 local function pollHover(menu)
@@ -212,6 +252,9 @@ function M.mouse(msg)
     end
     if msg[3] == "1" and hoverWas and ours[hoverWas] then pending = ours[hoverWas] end
 end
+
+-- Keys typed into the report box must not also work as the mod's key binds.
+function M.typing() return boxAddr ~= nil end
 
 function M.init(logFn, localPCFn, lobbyModule)
     log, localPC, lobby = logFn, localPCFn, lobbyModule
@@ -268,7 +311,7 @@ function M.tick()
     pcall(hideSaveNotices)
     pcall(blockSlotLists)
     local menu = findMenu()
-    if not menu then doneFor, ours, hoverWas, pending = nil, {}, nil, nil return end
+    if not menu then doneFor, ours, hoverWas, pending, boxAddr, focusBox = nil, {}, nil, nil, nil, false return end
     local a = menu:GetAddress()
     if doneFor ~= a then
         doneFor = a
@@ -292,6 +335,14 @@ function M.tick()
     elseif act == "back" then
         local ok, err = pcall(change, menu)
         if not ok then log("pausmeny-fel: %s", tostring(err)) end
+    elseif act == "report" then
+        bugreport.reset()
+        local ok, err = pcall(showReport, menu)
+        if not ok then log("pausmeny-rapport-fel: %s", tostring(err)) end
+    elseif act == "send" and bugreport.canSend() then
+        bugreport.send("now", typedReport(menu))
+    elseif act and act:sub(1, 2) == "e:" then
+        lobby.newWorldFromGame("Slot" .. act:sub(3))
     elseif act and act:sub(1, 2) == "w:" then
         log("pausmeny: laddar %s", act:sub(3))
         lobby.loadWorld(act:sub(3))
@@ -300,6 +351,10 @@ function M.tick()
     if page == "list" and table.concat(worldList(), "|") ~= listSig then
         local ok, err = pcall(showList, menu)
         if not ok then log("pausmeny-lista-fel: %s", tostring(err)) end
+    end
+    if focusBox then
+        local w = reportBox(menu)
+        if w and pcall(function() w.EditableTextBox:SetKeyboardFocus() end) then focusBox = false end
     end
     pollHover(menu)
 end

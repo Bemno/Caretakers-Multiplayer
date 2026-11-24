@@ -95,18 +95,47 @@ end
 -- 0x30 leaves out class defaults and templates (archetypes), exactly the ones
 -- named Default__/_GEN_VARIABLE (measured, testbank/motor/skanpris.lua); with
 -- the class looked up once, the scan took half the time (2026-11-21).
+-- FindObjects takes 3 ms for 1800 inventories, the calls on each 41 ms, every
+-- 2 s a stall (2026-11-24). What an inventory is, is kept by address and looked
+-- at again after 20-40 s, spread out; one without a save id yet soon.
+local invCache = {}         -- address -> { untilT, cand = { path, id }, owner } or { untilT }
+local RECHECK, RECHECK_SPREAD, RECHECK_EMPTY = 20, 20, 2
+local MAX_CHECKS = 300      -- after loading every inventory is new
+
 local function scan()
     candidates = {}
     local persistCls = StaticFindObject("/Script/Voyage.VoyagePersistentActorComponent")
+    local c0 = os.clock()
     local ok, comps = pcall(FindObjects, 0, "VoyageBaseInventoryComponent", "", 0, 0x30, false)
+    local c1, checked = os.clock(), 0
+    local t, cache = now(), {}
     for _, c in ipairs((ok and comps) or {}) do
         pcall(function()
-            local owner = c:GetOwner()
-            if owner and owner:IsValid() and isContainer(owner) and not (M.skip and M.skip(owner)) then
-                local id = idOfActor(owner, persistCls)
-                if id then candidates[#candidates + 1] = { path = pathOf(c), id = id } end
+            local addr = c:GetAddress()
+            local e = invCache[addr]
+            -- Over the cap an expired entry is used once more; a new one waits.
+            if not (e and e.untilT > t) and checked >= MAX_CHECKS then
+                if not e then return end
+            elseif not (e and e.untilT > t) then
+                checked = checked + 1
+                e = { untilT = t + RECHECK + math.random() * RECHECK_SPREAD }
+                local owner = c:GetOwner()
+                if owner and owner:IsValid() and isContainer(owner) then
+                    local id = idOfActor(owner, persistCls)
+                    if id then e.cand, e.owner = { path = pathOf(c), id = id }, owner
+                    else e.untilT = t + RECHECK_EMPTY end
+                end
             end
+            cache[addr] = e
+            -- The puppet's box is told apart only after it is made.
+            if e.cand and not (M.skip and M.skip(e.owner)) then candidates[#candidates + 1] = e.cand end
         end)
+    end
+    invCache = cache
+    local c2 = os.clock()
+    if (c2 - c0) * 1000 > 15 then
+        log("lådor: genomgång %.0f ms (sökning %.0f, %d av %d kontrollerade)", (c2 - c0) * 1000, (c1 - c0) * 1000,
+            checked, #((ok and comps) or {}))
     end
 end
 
@@ -216,7 +245,7 @@ function M.init(netModule, logFn, localPCFn, nowFn, propsModule, host)
 end
 
 function M.reset()
-    candidates, known, lastScan, lastPoll = {}, {}, -100, -100
+    candidates, known, lastScan, lastPoll, invCache = {}, {}, -100, -100, {}
 end
 
 function M.tick()

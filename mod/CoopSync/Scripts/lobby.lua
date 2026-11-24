@@ -21,6 +21,7 @@ local saveRequestedAt = 0
 local joining, lastHello, joinPeer = false, 0, nil
 local hostWorld              -- the host's world name, sent before the world file
 local pendingLoad                -- slot name to load once on the title screen
+local pendingNew                 -- world name to create once on the title screen
 
 -- What the menu shows.
 M.worlds, M.spSlots = {}, {}
@@ -47,6 +48,11 @@ local FOLLOW_AFTER = 10         -- s in the world before the guest leaves it
 -- the whole load, and the session must not count as over meanwhile.
 local travelingSince
 local TRAVEL_LIMIT = 300
+-- 2026-11-22: the guest's TravelToWorldWithSaveGame answered true but the game
+-- never left the title (9 min, Spelstartare). A load normally leaves "Empty"
+-- within 10 s, so a stuck one is asked again.
+local travelSlot, travelRetries = nil, 0
+local TRAVEL_RETRY_AFTER, TRAVEL_RETRIES = 45, 2
 -- A new world left the map once more before it settled (2026-11-21: the
 -- session ended 15 s after "New world"); for a while after creating one,
 -- leaving the map counts as part of the load.
@@ -138,9 +144,14 @@ local function loadSlot(slot)
         status("not_found", slot)
         return false
     end
-    local ok = UEHelpers.GetGameInstance():TravelToWorldWithSaveGame(MAP, save, slot, { InternalId = 0 })
-    log("laddar %s: %s", slot, tostring(ok))
-    if ok then travelingSince = os.time() end
+    local gi = UEHelpers.GetGameInstance()
+    local okS, st = pcall(function() return gi:GetCurrentState():ToString() end)
+    local ok = gi:TravelToWorldWithSaveGame(MAP, save, slot, { InternalId = 0 })
+    log("laddar %s: %s (tillstånd %s)", slot, tostring(ok), okS and tostring(st) or "?")
+    if ok then
+        travelingSince = os.time()
+        if travelSlot ~= slot then travelSlot, travelRetries = slot, 0 end
+    end
     return ok
 end
 
@@ -382,6 +393,21 @@ end
 
 function M.reloadWorld() return M.loadWorld(world) end
 
+-- Host: a new world from the Esc menu's empty slot, through the title screen
+-- like loadWorld; the guest follows (hostmove).
+function M.newWorldFromGame(name)
+    if role ~= "host" or levelName() ~= MAP or pendingLoad or pendingNew then return false end
+    name = cleanName(name)
+    if not name then return false end
+    if worldExists(name) then status("name_taken", name) return false end
+    log("ny värld %s från spelet", name)
+    status("creating", name)
+    pcall(function() require("props").pause() require("drops").pause() end)
+    pendingNew = name
+    pcall(function() UEHelpers.GetGameInstance():GotoInitialState() end)
+    return true
+end
+
 function M.isJoining() return joining end
 -- A guest on the title screen on its way into the host's world: joining,
 -- waiting for or receiving the world, or loading it.
@@ -461,7 +487,7 @@ end
 function M.cancelJoin()
     if not M.canCancel() then return end
     log("anslutning avbruten")
-    joining, rejoinPeer, pendingLoad = false, nil, nil
+    joining, rejoinPeer, pendingLoad, pendingNew = false, nil, nil, nil
     leave()
     M.status = ""
 end
@@ -479,7 +505,13 @@ function M.tick()
         if level == MAP and statusSticky then M.status, statusSticky = "", false end
     end
     if role and level == MAP then wasInMp = true end
-    if level == MAP then travelingSince = nil end
+    if level == MAP then travelingSince, travelSlot = nil, nil end
+    if travelSlot and travelingSince and level == "Empty" and not pendingLoad
+        and travelRetries < TRAVEL_RETRIES and os.time() - travelingSince >= TRAVEL_RETRY_AFTER then
+        travelRetries = travelRetries + 1
+        log("laddningen kom aldrig igång (%d s på titeln), försök %d", os.time() - travelingSince, travelRetries)
+        loadSlot(travelSlot)
+    end
     local traveling = (travelingSince and os.time() - travelingSince < TRAVEL_LIMIT) or os.time() < creatingUntil
     if level == MAP then
         moveSent = false
@@ -497,7 +529,7 @@ function M.tick()
         pcall(function() require("props").pause() require("drops").pause() end)
         pcall(function() UEHelpers.GetGameInstance():GotoInitialState() end)
     end
-    if wasInMp and level == "Empty" and not pendingLoad and not joining and not sendState and not traveling then
+    if wasInMp and level == "Empty" and not pendingLoad and not pendingNew and not joining and not sendState and not traveling then
         onTitleSince = onTitleSince or os.time()
         if os.time() - onTitleSince >= LEAVE_SECONDS then leave() end
     else
@@ -505,6 +537,11 @@ function M.tick()
     end
     local guardWait = pendingLoad and pendingLoad ~= "Coop/" .. CLIENT and not guardReady
         and guardAskedAt and os.time() - guardAskedAt < GUARD_WAIT
+    if pendingNew and level == "Empty" then
+        local name = pendingNew
+        pendingNew = nil
+        M.newWorld(name, M.hostMode)
+    end
     if pendingLoad and level == "Empty" and not guardWait then
         if not guardReady and pendingLoad ~= "Coop/" .. CLIENT then log("vakten svarade inte, laddar ändå") end
         local slot = pendingLoad

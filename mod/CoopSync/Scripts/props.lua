@@ -19,6 +19,7 @@ local HELD_INTERVAL = 1 / 30
 local lastHeldSent = -100
 local weldSent = false
 local remote = {}   -- id -> { comp, lastUpdate, from, to, span, boatKey }
+local boxQuiet = {}  -- box root address -> until time: placed by a message, not moved here
 local current, place, loosen
 -- Crates the guest lets go of are settled by the host. On the guest's boat,
 -- which the mod moves every frame, they bounced around, knocked other crates
@@ -324,11 +325,14 @@ local function sendWeld(comp, id)
     local owner = parent:GetOwner()
     local ppc = owner and owner:IsValid() and owner:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
     local pid = ppc and ppc:IsValid() and idOf(ppc)
-    if not pid then log("svetsad id %s på %s utan spar-id, skickas inte", id, owner and owner:GetFullName() or "?") return end
+    -- A wall of the world has no save id; it goes by its path ("p" + path),
+    -- or a crate hung on it fell in the other game (2026-11-24).
+    local path = not pid and owner and owner:IsValid() and owner:GetFullName():match("%S+%s+(%S+)")
+    if not pid and not path then log("svetsad id %s på %s utan spar-id, skickas inte", id, owner and owner:GetFullName() or "?") return end
     local rel = StaticFindObject(KML):MakeRelativeTransform(comp:K2_GetComponentToWorld(), parent:K2_GetComponentToWorld())
     local l = rel.Translation
     local r = StaticFindObject(KML):Quat_Rotator(rel.Rotation)
-    net.send("weld", wire(id), wire(pid), parent:GetFName():ToString(),
+    net.send("weld", wire(id), pid and wire(pid) or "p" .. path, parent:GetFName():ToString(),
         f1(l.X), f1(l.Y), f1(l.Z), f1(RotP(r)), f1(r.Yaw), f1(r.Roll))
     log("svetsad id %s på %s/%s, skickad", id, owner:GetFullName(), parent:GetFName():ToString())
 end
@@ -699,6 +703,7 @@ function M.settle(id)
     local rem = remote[id]
     if not rem then return end
     remote[id] = nil
+    pcall(function() boxQuiet[rem.comp:GetAddress()] = now() + 2 end)
     pcall(function() rem.buf, rem.from = nil, nil place(rem, now()) end)
     pcall(function() rem.comp:GetOwner():SetActorEnableCollision(true) end)
     local b = rem.boatKey and require("boat").find(rem.boatKey)
@@ -821,7 +826,100 @@ local function checkBack()
     end
 end
 
+-- F moves a placed player box as a blueprint and E twice puts it there, with no
+-- grab, so nothing was sent (2026-11-24). The other game's box stayed put, and
+-- on the guest's boat the copy, fastened without collision, got physics from the
+-- placement and fell through the deck. The game offers F only on boxes tagged
+-- Fabricated; boxes that came through the mod lacked the tags a built one has.
+local BOX_CLASSES = { "BP_Inventory_PlayerBox_Small_C", "BP_Inventory_PlayerBox_C", "BP_Inventory_PlayerBox_Large_C" }
+local FAB_TAGS = { "Fabricated", "ExcludeFromModuleGroups" }
+local BOX_POLL, BOX_LIST, BOX_MOVE = 0.5, 5, 10
+local boxes, boxListAt, boxPollAt = {}, -100, -100
+local boxSeen = {}   -- root address -> { key = parent address, p = place }
+
+local function refreshBoxes()
+    local list = {}
+    for _, cls in ipairs(BOX_CLASSES) do
+        for _, a in ipairs(FindObjects(0, cls, "", 0, 0x30, false) or {}) do
+            pcall(function()
+                if not a:IsValid() or a.bHidden or a:GetFullName():find("Default__", 1, true) then return end
+                if a:GetClass():GetFName():ToString() ~= cls then return end
+                for _, t in ipairs(FAB_TAGS) do
+                    if not a:ActorHasTag(FName(t)) then a.Tags[a.Tags:GetArrayNum() + 1] = FName(t) end
+                end
+                list[#list + 1] = { actor = a, root = a.RootComponent }
+            end)
+        end
+    end
+    boxes = list
+end
+
+local function boxPlace(root)
+    local pa = root:GetAttachParent()
+    local l = root:K2_GetComponentLocation()
+    local b = boatAt(l)
+    local p = b and StaticFindObject(KML):InverseTransformLocation(b:GetTransform(), l) or l
+    return (pa and pa:IsValid()) and pa:GetAddress() or 0, p
+end
+
+local function boxBusy(root)
+    local addr = root:GetAddress()
+    if held and held:IsValid() and held:GetAddress() == addr then return true end
+    for _, r in pairs(remote) do
+        if r.comp and r.comp:IsValid() and r.comp:GetAddress() == addr then return true end
+    end
+    for _, w in pairs(watching) do
+        if w.comp and w.comp:IsValid() and w.comp:GetAddress() == addr then return true end
+    end
+    return false
+end
+
+local function pollBoxes()
+    if now() - boxListAt > BOX_LIST then boxListAt = now() refreshBoxes() end
+    if now() - boxPollAt < BOX_POLL then return end
+    boxPollAt = now()
+    for _, e in ipairs(boxes) do
+        pcall(function()
+            local root = e.root
+            if not root:IsValid() then return end
+            local addr = root:GetAddress()
+            local key, p = boxPlace(root)
+            local o = boxSeen[addr]
+            boxSeen[addr] = { key = key, p = p }
+            if not o or boxBusy(root) or (boxQuiet[addr] or 0) > now() then return end
+            local d = math.sqrt((p.X - o.p.X) ^ 2 + (p.Y - o.p.Y) ^ 2 + (p.Z - o.p.Z) ^ 2)
+            if key == o.key and d < BOX_MOVE then return end
+            -- A box that fell or was knocked is physics; F places it still.
+            if root:IsSimulatingPhysics(FName("None")) then return end
+            local pc = e.actor:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
+            local id = pc and pc:IsValid() and idOf(pc)
+            if not id then return end
+            sendProp(wire(id), root)
+            local pa = root:GetAttachParent()
+            if pa and pa:IsValid() then sendWeld(root, id) else net.send("rest", wire(id)) end
+            log("låda %s flyttad med F (%.0f cm), skickad: %s", id, d, where(root))
+        end)
+    end
+end
+
+-- The placement turns physics on; a copy fastened query-only (fastenWithoutWeld)
+-- then falls through the boat at once, so it is caught in the same frame.
+local function catchFallingBoxes()
+    for _, e in ipairs(boxes) do
+        pcall(function()
+            local root = e.root
+            if not root:IsValid() or root:GetCollisionEnabled() ~= 1 or not root:IsSimulatingPhysics(FName("None")) then return end
+            local b = boatAt(root:K2_GetComponentLocation())
+            local hull = b and hullOf(b)
+            if hull then fastenWithoutWeld(root, hull) else root:SetCollisionEnabled(3) end
+            log("låda %s fick fysik utan kollision (flyttad med F), %s", e.actor:GetFName():ToString(), hull and "fäst vid båten igen" or "kollision på")
+        end)
+    end
+end
+
 function M.tick()
+    local okBx, errBx = pcall(pollBoxes)
+    if not okBx then log("låd-fel: %s", tostring(errBx)) end
     local comp, id = grabbed()
     if comp then releasedAt = nil end
     -- Stowed straight from the ground it was never in the hand, and the other
@@ -873,7 +971,19 @@ function M.tick()
         local ok, mine = pcall(function() return M.ownsPhysicsAt(held:K2_GetComponentLocation()) end)
         return ok and mine
     end)() then
-        if heldId and held:IsValid() then
+        -- Hung on a wall: the game welded it to what it touched when let go.
+        -- Handed over loose, it fell in the other game and only the small box
+        -- seemed to stay on a wall (2026-11-24); the weld is sent instead.
+        local okF, fixed = pcall(function()
+            local pa = held:GetAttachParent()
+            return StaticFindObject(MISC):IsPrimitiveWelded(held) or (pa ~= nil and pa:IsValid())
+        end)
+        if heldId and held:IsValid() and okF and fixed then
+            sendProp(wire(heldId), held)
+            local okS, errS = pcall(sendWeld, held, heldId)
+            if not okS then log("svets-fel: %s", tostring(errS)) end
+            log("släppt id %s, fast hos mig (%s), svetsen skickas", tostring(heldId), where(held))
+        elseif heldId and held:IsValid() then
             local root = held:GetOwner().RootComponent
             -- A throw: the speed goes along so the host's copy flies the same.
             local okV, v = pcall(function() return held:GetPhysicsLinearVelocity(FName("None")) end)
@@ -982,8 +1092,13 @@ local function handleWeld(msg)
     local pc = findById(id)
     local owner = pc and pc:GetOwner()
     local root = owner and owner:IsValid() and owner.RootComponent
-    local ppc = findById(pid)
-    local powner = ppc and ppc:GetOwner()
+    local powner
+    if pid:sub(1, 2) == "p/" then
+        powner = StaticFindObject(pid:sub(2))
+    else
+        local ppc = findById(pid)
+        powner = ppc and ppc:GetOwner()
+    end
     local parent = powner and powner:IsValid() and componentNamed(powner, compName)
     if not (root and root:IsValid() and parent) then
         if not root then noteEarly(id, "weld", msg) end
@@ -999,6 +1114,7 @@ local function handleWeld(msg)
     pcall(function() root:SetSimulatePhysics(false) end)
     root:K2_SetWorldLocationAndRotation(kml:TransformLocation(parent:K2_GetComponentToWorld(), loc),
         kml:ComposeRotators(rot, parent:K2_GetComponentRotation()), false, {}, true)
+    boxQuiet[root:GetAddress()] = now() + 2
     local attached, welded = weldInto(root, parent)
     log("svetsar %s på %s/%s: fäst %s, svetsad %s, %s", id, powner:GetFullName(), compName, tostring(attached), tostring(welded), physState(root))
 end
@@ -1070,6 +1186,7 @@ end
 -- moves with the boat between updates instead of being left behind.
 function M.frame()
     local t = now()
+    catchFallingBoxes()
     if held and heldId and t - lastHeldSent >= HELD_INTERVAL then
         lastHeldSent = t
         pcall(function() if held:IsValid() then sendProp(wire(heldId), held) end end)
@@ -1088,6 +1205,19 @@ end
 function M.claimed(id)
     local e = early[id]
     early[id], missing[id] = nil, nil
+    -- Gone before the copy existed: scraps from the guest's grinder were picked
+    -- up in its game within a second, and the copies stayed here and came back
+    -- to it as new loot (2026-11-24).
+    if goneAt[id] and now() - goneAt[id] < 10 then
+        local pc = findById(id)
+        local owner = pc and pc:GetOwner()
+        if owner and owner:IsValid() then
+            removedByPeer[idOf(pc) or id] = true
+            log("föremål %s: borta hos den andra innan kopian fanns, tas bort", id)
+            owner:K2_DestroyActor()
+        end
+        return
+    end
     if not e or now() - e.t > EARLY_SECONDS then return end
     log("föremål %s: tillämpar det som kom före kopian (%s%s%s)", id, e.pose and "läge " or "",
         e.rest and "vila " or "", e.weld and "svetsning" or "")
@@ -1209,6 +1339,7 @@ function M.reset()
     aliased, pairedLocal, ownNew, toPeer, removedByPeer = {}, {}, {}, {}, {}
     detached, boundsCache, watching, lastReweld, onBack, goneAt = {}, {}, {}, {}, {}, {}
     muteUntil, stampOffset = 0, nil
+    boxes, boxListAt, boxPollAt, boxSeen, boxQuiet = {}, -100, -100, {}, {}
     live, held = false, false
 end
 

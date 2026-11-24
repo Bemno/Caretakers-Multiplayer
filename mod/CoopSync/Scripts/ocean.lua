@@ -27,21 +27,53 @@ local function f1(v) return string.format("%.1f", v or 0) end
 
 -- Every loose item in the world is gone through: the class is looked up once
 -- per scan, not per item (scans took up to 107 ms in new areas, 2026-11-21).
+-- FindObjects takes 2 ms for 1700 items, the calls on each item 27 ms, every
+-- 2 s a stall (2026-11-24). What an item is, is kept by address and looked at
+-- again after 20-40 s, spread so the items do not all come due at once; an
+-- item without loot yet is looked at again soon.
+local itemCache = {}           -- address -> { untilT, id, item, sack } or { untilT, none = true }
+local RECHECK, RECHECK_SPREAD, RECHECK_EMPTY = 20, 20, 4
+-- After loading every item is new: 1900 checks a scan took 20-38 ms for the
+-- first minute. The rest wait for the next scans.
+local MAX_CHECKS = 300
+
 local function loot()
+    local c0 = os.clock()
     local ok, found = pcall(FindObjects, 0, "VoyageDynamicMeshActor", "", 0, 0x10, false)
+    local c1, checked = os.clock(), 0
     local list = {}
     local persistCls = StaticFindObject(PERSIST_CLASS)
     if not (persistCls and persistCls:IsValid()) then return list end
+    local t, cache = now(), {}
     for _, a in ipairs((ok and found) or {}) do
         pcall(function()
-            if not a:IsValid() then return end
-            local it = a.CurrentVisualizeItem
-            if not (it and it:IsValid()) then return end
-            local pc = a:GetComponentByClass(persistCls)
-            local id = pc and pc:IsValid() and pc.PersistentUniqueId
-            if not id or id == 0 then return end
-            list[#list + 1] = { actor = a, id = tostring(id), item = it }
+            local addr = a:GetAddress()
+            local c = itemCache[addr]
+            -- Over the cap an expired entry is used once more; a new one waits.
+            if not (c and c.untilT > t) and checked >= MAX_CHECKS then
+                if not c then return end
+            elseif not (c and c.untilT > t) then
+                checked = checked + 1
+                c = { untilT = t + RECHECK_EMPTY * (1 + math.random()), none = true }
+                if a:IsValid() then
+                    local it = a.CurrentVisualizeItem
+                    local pc = it and it:IsValid() and a:GetComponentByClass(persistCls)
+                    local id = pc and pc:IsValid() and pc.PersistentUniqueId
+                    if id and id ~= 0 then
+                        c = { untilT = t + RECHECK + math.random() * RECHECK_SPREAD, id = tostring(id), item = it,
+                            sack = a:GetClass():GetFName():ToString():find("Eggsack", 1, true) ~= nil }
+                    end
+                end
+            end
+            cache[addr] = c
+            if not c.none then list[#list + 1] = { actor = a, id = c.id, item = c.item, sack = c.sack } end
         end)
+    end
+    itemCache = cache
+    local c2 = os.clock()
+    if (c2 - c0) * 1000 > 15 then
+        log("hav: genomgång %.0f ms (sökning %.0f, %d av %d kontrollerade, minne %.0f MB)", (c2 - c0) * 1000, (c1 - c0) * 1000,
+            checked, #((ok and found) or {}), collectgarbage("count") / 1024)
     end
     return list
 end
@@ -71,11 +103,20 @@ local function stopAreas()
     end
 end
 
+-- A copy of the guest's drop shows up a moment before drops.lua links it; sent
+-- as new loot in that moment, the guest's grinder scraps came back to it and
+-- lay there (2026-11-24). New loot is sent once it has stayed unlinked a while.
+local HOST_GRACE = 4
+
 local function hostScan(baseline)
     local sent = 0
     for _, x in ipairs(loot()) do
-        if not known[x.id] then
+        if not known[x.id] and not baseline and not isLinked(x.id) and not props.sentDrops[x.id] then
+            suspects[x.id] = suspects[x.id] or now()
+        end
+        if not known[x.id] and (baseline or isLinked(x.id) or props.sentDrops[x.id] or now() - suspects[x.id] >= HOST_GRACE) then
             known[x.id] = true
+            suspects[x.id] = nil
             if not baseline and not isLinked(x.id) and not props.sentDrops[x.id] and not nearOwnPawn(x.actor) then
                 local l, r = x.actor:K2_GetActorLocation(), x.actor:K2_GetActorRotation()
                 props.markOwn(x.id)
@@ -97,7 +138,7 @@ local sackPaths = {}           -- guest: path -> true for sacks present at load
 local function guestSacks(baseline, items)
     for _, x in ipairs(items) do
         pcall(function()
-            if not x.actor:GetClass():GetFName():ToString():find("Eggsack", 1, true) then return end
+            if not x.sack then return end
             local path = x.actor:GetFullName():match("%S+%s+(%S+)")
             if baseline then sackPaths[path] = true return end
             if sackPaths[path] or props.claimedPaths[path] then return end
@@ -141,7 +182,7 @@ function M.init(netModule, logFn, localPCFn, nowFn, propsModule, host)
 end
 
 function M.reset()
-    worldSince, lastScan, known, suspects, stoppedAreas, sackPaths = nil, -100, {}, {}, {}, {}
+    worldSince, lastScan, known, suspects, stoppedAreas, sackPaths, itemCache = nil, -100, {}, {}, {}, {}, {}
 end
 
 function M.tick()

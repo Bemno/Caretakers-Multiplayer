@@ -85,7 +85,8 @@ local function snapshot()
                         local bytes = {}
                         local raw = s.Data.ItemData
                         if type(raw) == "table" then
-                            for _, v in ipairs(raw) do bytes[#bytes + 1] = tostring(v) end
+                            -- UE4SS 4 gives RemoteUnrealParams; tostring wrote their addresses.
+                            for _, v in ipairs(raw) do bytes[#bytes + 1] = tostring(type(v) == "number" and v or v:get()) end
                         else
                             pcall(function() raw:ForEach(function(_, v) bytes[#bytes + 1] = tostring(v:get()) end) end)
                         end
@@ -175,6 +176,8 @@ local function loadItem(path)
     return item and item:IsValid() and item or nil
 end
 
+local pendingWorn  -- worn items laid down at restore, waiting for their state
+
 local function restore(path, clear)
     local byName = {}
     for _, inv in ipairs(inventories()) do byName[inv:GetFName():ToString()] = inv end
@@ -205,9 +208,13 @@ local function restore(path, clear)
     end
     local wornItems = {}
     for _, line in ipairs(worn) do
-        local itemPath, count = line:match("^[^|]*|%d+|([^|]*)|(%d+)|")
+        local itemPath, count, flags, bytes = line:match("^[^|]*|%d+|([^|]*)|(%d+)|(%d+)|%-?%d+|(.*)$")
         local item = itemPath and loadItem(itemPath)
-        if item then wornItems[#wornItems + 1] = { item = item, count = tonumber(count), path = itemPath } end
+        local list = {}
+        if bytes and not bytes:find("Remote", 1, true) then
+            for b in bytes:gmatch("%d+") do list[#list + 1] = tonumber(b) end
+        end
+        if item then wornItems[#wornItems + 1] = { item = item, count = tonumber(count), path = itemPath, flags = tonumber(flags), bytes = list } end
     end
     for _, line in ipairs(lines) do
         local name, slot, itemPath, count, flags, version, bytes = line:match("^([^|]*)|([%dledig]+)|([^|]*)|(%d+)|(%d+)|(%-?%d+)|(.*)$")
@@ -221,15 +228,23 @@ local function restore(path, clear)
         elseif inv and item then
             local data = { ItemCount = tonumber(count), Flags = tonumber(flags), Version = tonumber(version) }
             local list = {}
-            for b in bytes:gmatch("%d+") do list[#list + 1] = tonumber(b) end
-            if #list > 0 then data.ItemData = list end
+            -- Old files hold addresses ("RemoteUnrealParam: 0000...") instead of bytes.
+            if not bytes:find("Remote", 1, true) then
+                for b in bytes:gmatch("%d+") do list[#list + 1] = tonumber(b) end
+            end
             log("inventarie: lägger %s i %s plats %s", itemPath:match("[^%.]+$") or itemPath, name, slot)
+            -- A byte list in the struct crashed the game (UE4SS 4, drops.lua): the
+            -- item goes in without its state, which is then written into the slot.
             local okA, added = pcall(function() return inv:AddToSlot(item, tonumber(slot), data, true) end)
-            if not (okA and added and added > 0) and data.ItemData then
-                -- Without the item's own state if that is what it refused.
-                data.ItemData = nil
-                okA, added = pcall(function() return inv:AddToSlot(item, tonumber(slot), data, true) end)
-                log("inventarie: %s utan tillstånd -> %s", itemPath, tostring(added))
+            if okA and added and added > 0 and #list > 0 then
+                local okS, errS = pcall(function()
+                    inv.Items:ForEach(function(k, v)
+                        if k:get() ~= tonumber(slot) then return end
+                        local arr = v:get().Data.ItemData
+                        for i, b in ipairs(list) do arr[i] = b end
+                    end)
+                end)
+                log("inventarie: tillstånd för %s (%d byte): %s", itemPath:match("[^%.]+$") or itemPath, #list, okS and "ok" or tostring(errS))
             end
             if okA and added and added > 0 then n = n + 1 else failed = failed + 1 log("inventarie: kunde inte lägga %s i %s: %s", itemPath, name, tostring(added)) end
         elseif line ~= "" then
@@ -252,10 +267,56 @@ local function restore(path, clear)
             }
             StaticFindObject("/Script/Voyage.Default__VoyageInventoryUtils"):SpawnActorsForItems(
                 pawn:GetWorld(), transform, items, { bSimulatePhysics = true, bAwake = true }, 0)
+            -- Spawned without their own state, weapons were sometimes recycled into
+            -- materials when picked up (todo 21/11); the state is written into each
+            -- one's slot once they exist (wornTick).
+            local withState = {}
+            for _, w in ipairs(wornItems) do if #w.bytes > 0 then withState[#withState + 1] = w end end
+            if #withState > 0 then pendingWorn = { at = os.clock() + 1, loc = transform.Translation, items = withState, tries = 0 } end
         end)
         for _, w in ipairs(wornItems) do log("inventarie: buren %s läggs på marken: %s", w.path:match("[^%.]+$") or w.path, okD and "ok" or tostring(errD)) end
     end
     log("inventarie: återställt %d platser (%d misslyckades) från %s", n, failed, path)
+end
+
+local INV_COMP = "/Script/Voyage.VoyageBaseInventoryComponent"
+local function wornTick()
+    if not pendingWorn or os.clock() < pendingWorn.at then return end
+    local pw = pendingWorn
+    pw.tries, pw.at = pw.tries + 1, os.clock() + 1
+    local cls = StaticFindObject(INV_COMP)
+    for _, a in ipairs(FindObjects(0, "BP_DynamicMeshActor_C", "", 0, 0x30, false) or {}) do
+        pcall(function()
+            if not a:IsValid() then return end
+            local l = a:K2_GetActorLocation()
+            if (l.X - pw.loc.X) ^ 2 + (l.Y - pw.loc.Y) ^ 2 + (l.Z - pw.loc.Z) ^ 2 > 600 ^ 2 then return end
+            local inv = a:GetComponentByClass(cls)
+            if not (inv and inv:IsValid()) then return end
+            for i, w in ipairs(pw.items) do
+                if inv:GetNumItems(w.item) > 0 then
+                    local done = false
+                    inv.Items:ForEach(function(_, v)
+                        if done then return end
+                        local data = v:get().Data
+                        local arr = data.ItemData
+                        if arr:GetArrayNum() > 0 then return end
+                        for j, b in ipairs(w.bytes) do arr[j] = b end
+                        if w.flags then data.Flags = w.flags end
+                        done = true
+                    end)
+                    if done then
+                        log("inventarie: tillstånd för buren %s (%d byte) på marken", w.path:match("[^%.]+$") or w.path, #w.bytes)
+                        table.remove(pw.items, i)
+                        return
+                    end
+                end
+            end
+        end)
+    end
+    if #pw.items == 0 or pw.tries >= 5 then
+        for _, w in ipairs(pw.items) do log("inventarie: hittade inte buren %s på marken", w.path) end
+        pendingWorn = nil
+    end
 end
 
 function M.init(logFn, localPCFn, lobbyModule, io, propsModule)
@@ -313,6 +374,8 @@ end
 
 -- Called on the mod tick once the world has settled (main.lua waits 30 s).
 function M.tick(now)
+    local okW, errW = pcall(wornTick)
+    if not okW then pendingWorn = nil log("inventarie: tillstånd på marken: %s", tostring(errW)) end
     local p = localPC().Pawn
     if not (p and p:IsValid()) then return end
     if lobby.role() == "host" then return hostTick(now, p) end
@@ -333,6 +396,6 @@ function M.tick(now)
 end
 
 -- A new world load starts over.
-function M.reset() restored, hostSeen = false, nil end
+function M.reset() restored, hostSeen, pendingWorn = false, nil, nil end
 
 return M
