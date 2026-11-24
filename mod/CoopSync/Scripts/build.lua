@@ -384,6 +384,38 @@ local function removeRemote(key, why)
     log("bygge: blueprint %s borta här (%s)", key, why)
 end
 
+-- On a boat the copy is welded into the hull like the game's own modules
+-- (props.weldOnBoat). Only attached, with full collision after the half second,
+-- it shoved the hull once this game ran the boat's physics: a lamp built at the
+-- bow by the other player spun the boat round its bow (2026-11-24). Where the
+-- other game runs the physics weldOnBoat fastens query only, and so do the
+-- module's other parts, so it cannot push when the physics moves here later.
+local function boatAbove(a)
+    local boat = require("boat")
+    local p = a:GetAttachParentActor()
+    for _ = 1, 5 do
+        if not (p and p:IsValid()) then return nil end
+        if boat.isBoat(p) then return p end
+        p = p:GetAttachParentActor()
+    end
+end
+
+local function fastenOnBoat(a)
+    local root = a.RootComponent
+    local l = root:K2_GetComponentLocation()
+    local b = boatAbove(a)
+    if not (b or props.onBoat(l)) then return false end
+    props.weldOnBoat(root, l, b)
+    if not StaticFindObject("/Script/Voyage.Default__VoyageMiscBlueprintFunctionLibrary"):IsPrimitiveWelded(root) then
+        for _, e in ipairs(a:K2_GetComponentsByClass(StaticFindObject("/Script/Engine.PrimitiveComponent")) or {}) do
+            local okG, c = pcall(function() return e:get() end)
+            c = (okG and c) or e
+            pcall(function() c:SetCollisionEnabled(1) end)
+        end
+    end
+    return true
+end
+
 local function buildRemote(key, classPath, loc, rot, peerModuleId, itemPath, m)
     removeRemote(key, "byggd hos den andra")
     if M.notModule(classPath) then log("bygge: %s är ingen modul, skapas inte", classPath) return end
@@ -398,10 +430,14 @@ local function buildRemote(key, classPath, loc, rot, peerModuleId, itemPath, m)
     pcall(function() a:SetActorEnableCollision(false) end)
     place(a, loc, rot, m, 13)
     local placed = pathOf(a)
-    ExecuteInGameThreadWithDelay(500, function()
+    local okB, onBoat = pcall(fastenOnBoat, a)
+    if not okB then log("bygge: fästa på båten: %s", tostring(onBoat)) end
+    log("bygge: %s på båten: %s", placed, tostring(okB and onBoat))
+    if okB and onBoat then placed = nil end
+    if placed then ExecuteInGameThreadWithDelay(500, function()
         local m2 = StaticFindObject(placed)
         if m2 and m2:IsValid() then pcall(function() m2:SetActorEnableCollision(true) end) end
-    end)
+    end) end
     -- The save id is set a moment after spawning; pair it once it is there.
     local path = pathOf(a)
     local tries = 0

@@ -172,6 +172,14 @@ class Saves:
         _move_all(self.store, self.coop, skip=(VAULT, TRASH, BACKUPS, CLIENT + ".sav"))
         self.in_session = True
 
+    def _set_aside(self, path):
+        """Nothing the guard replaces or removes is deleted: a vault left by a killed
+        session (test bench) once erased a singleplayer save made after it on the
+        next start (2026-11-24). It goes to CoopWorlds/.borttagna/singleplayer."""
+        dst = os.path.join(self.store, TRASH, "singleplayer")
+        os.makedirs(dst, exist_ok=True)
+        os.replace(path, os.path.join(dst, f"{time.strftime('%Y%m%d_%H%M%S')}_{os.path.basename(path)}"))
+
     def guard_check(self):
         """Puts protected files back; returns the paths it touched."""
         mpath = os.path.join(self.vault, "manifest.json")
@@ -186,6 +194,7 @@ class Saves:
                 st = os.stat(path)
                 if st.st_size == info["size"] and st.st_mtime == info["mtime"]:
                     continue
+                self._set_aside(path)
             shutil.copy2(info["copy"], path)
             touched.append(path)
         for d, marker in dirs:
@@ -194,7 +203,7 @@ class Saves:
             for f in os.listdir(d):
                 path = os.path.join(d, f)
                 if marker in f and path not in manifest:
-                    os.remove(path)
+                    self._set_aside(path)
                     touched.append(path)
         return touched
 

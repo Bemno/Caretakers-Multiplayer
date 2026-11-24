@@ -506,120 +506,155 @@ local function handleSocketAct(msg)
     log("uttag %s#%s: uttaget finns inte här", key, name)
 end
 
+-- One poll is spread over CABLE_SLICES ticks, each taking the cables whose
+-- address falls in its slice: all ~270 cables (530 plugged ends) in one tick
+-- was a 40-60 ms stall every second (bench 2026-11-24, no single call
+-- dominated). The states of a poll are swapped in when its last slice is done.
+-- The slice counts are odd: object addresses are multiples of 16 or more, and
+-- with 10 slices every cable fell in the five even ones.
+local CABLE_SLICES = 7
+local pass
+
+local function inSlice(obj, slice, n) return (obj:GetAddress() // 16) % n == slice end
+
+-- allCables for one slice: the address test before the name check, which
+-- over all cables in every slice cost more than the slice itself.
+local function sliceCables(slice)
+    local ok, found = pcall(FindObjects, 0, "ModulesConnectCable", "", 0, 0x30, false)
+    local list = {}
+    for _, c in ipairs((ok and found) or {}) do
+        local okV, valid = pcall(function()
+            return inSlice(c, slice, CABLE_SLICES) and c:IsValid() and not c:GetFullName():find("Default__", 1, true)
+        end)
+        if okV and valid then list[#list + 1] = c end
+    end
+    return list
+end
+
 local function pollCables()
-    if now() - lastPoll < CABLE_POLL_SECONDS or #pendingCables > 0 then return end
-    lastPoll = now()
-    local first = cableStates == nil
-    if first then baselineAt = now() end
-    local states = {}
-    local moored = false
-    local moorLines, moorPaths = {}, {}
-    for _, c in ipairs(allCables()) do
-        local okK, key = pcall(keyOf, c)
-        local okA, a, b = pcall(plugsOf, c)
-        if okA and a ~= "-" and b ~= "-" then
-            local okM, isMoor = pcall(function() return c.bMooringCable end)
-            local okS, off = false, false
-            if okM and isMoor then okS, off = pcall(stretchedOff, c, key, a, b) end
-            if okS and off then
-                isMoor = false
+    if #pendingCables > 0 then return end
+    if not pass then
+        if now() - lastPoll < CABLE_POLL_SECONDS then return end
+        lastPoll = now()
+        pass = { slice = 0, first = cableStates == nil, states = {}, moored = false, moorLines = {}, moorPaths = {} }
+        if pass.first then baselineAt = now() end
+    end
+    local first, states, slice = pass.first, pass.states, pass.slice
+    -- Advanced first: an error in a slice must not hold the poll on it.
+    pass.slice = slice + 1
+    local moored = pass.moored
+    local moorLines, moorPaths = pass.moorLines, pass.moorPaths
+    for _, c in ipairs(sliceCables(slice)) do
+        do
+            local okK, key = pcall(keyOf, c)
+            local okA, a, b = pcall(plugsOf, c)
+            if okA and a ~= "-" and b ~= "-" then
+                local okM, isMoor = pcall(function() return c.bMooringCable end)
+                local okS, off = false, false
+                if okM and isMoor then okS, off = pcall(stretchedOff, c, key, a, b) end
+                if okS and off then
+                    isMoor = false
+                end
+                if okM and isMoor then
+                    moored = true
+                    local okL, len = pcall(function() return c.Cable.CableLength end)
+                    moorLines[#moorLines + 1] = a .. "|" .. b .. "|" .. (okL and math.floor((len or 0) / 50) or 0)
+                    moorPaths[#moorPaths + 1] = c:GetFullName():match("%S+%s+(%S+)")
+                end
             end
-            if okM and isMoor then
-                moored = true
+            -- Cables without a save id are the game's temporary previews while a
+            -- cable is being placed.
+            if okK and okA and key:sub(1, 1) == "i" then
+                -- The length (in 50 cm steps) is part of the state so that a copy
+                -- shortens while the owner reels the cable in.
                 local okL, len = pcall(function() return c.Cable.CableLength end)
-                moorLines[#moorLines + 1] = a .. "|" .. b .. "|" .. (okL and math.floor((len or 0) / 50) or 0)
-                moorPaths[#moorPaths + 1] = c:GetFullName():match("%S+%s+(%S+)")
-            end
-        end
-        -- Cables without a save id are the game's temporary previews while a
-        -- cable is being placed.
-        if okK and okA and key:sub(1, 1) == "i" then
-            -- The length (in 50 cm steps) is part of the state so that a copy
-            -- shortens while the owner reels the cable in.
-            local okL, len = pcall(function() return c.Cable.CableLength end)
-            local st = a .. "|" .. b .. "|" .. (okL and math.floor((len or 0) / 50) or 0)
-            states[key] = st
-            pollDir(c, key, a, b, first)
-            local prev = not first and cableStates[key]
-            if not first and not prev and ((emptiedAt[a] and now() - emptiedAt[a] < RETURN_SECONDS)
-                or (emptiedAt[b] and now() - emptiedAt[b] < RETURN_SECONDS)) then
-                returned[key] = now() + RETURN_SECONDS
-                log("kabel %s: båtens egen lina tillbaka i tömt uttag, skickas inte", key)
-            end
-            if returned[key] then
-                if returned[key] > now() then prev = st else returned[key] = nil prev = prev or st end
-            end
-            if not first and not prev then
-                local okN, near = pcall(nearPlayer, c)
-                -- A cable in our own body was just plugged in by us: the
-                -- host's charging cable laid in the first minute was taken
-                -- for a loaded one and never reached the guest (2026-11-15).
-                local okB, body = pcall(function() return keyOf(localPC().Pawn) .. "#" end)
-                local inBody = okB and (a:sub(1, #body) == body or b:sub(1, #body) == body)
-                -- Plugged at both ends near us at first sight: laid by us
-                -- between two polls (the second mooring line, 2026-11-16).
-                -- A saved one has the same id in the other game, which then
-                -- only finds it there.
-                local okE, nearEnd = pcall(endNearPlayer, c)
-                local laidByUs = plugCount(st) == 2 and okE and nearEnd
-                if not inBody and not laidByUs and (now() - baselineAt < LOAD_GRACE or not (okN and near)) then
-                    settling[key] = { untilT = now() + SETTLE_SECONDS, from = st }
-                    log("kabel %s: inladdad (%s), skickas inte", key, st)
-                else
-                    -- Laid by us: sent as ours ("h"/"g" + id, props.markOwn).
-                    local pcN = c:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
-                    local rawId = pcN and pcN:IsValid() and tostring(pcN.PersistentUniqueId)
-                    if rawId and not copies[rawId] then
-                        props.markOwn(rawId)
-                        local okK2, key2 = pcall(keyOf, c)
-                        if okK2 and key2 ~= key then
-                            states[key] = nil
-                            key = key2
-                            states[key] = st
+                local st = a .. "|" .. b .. "|" .. (okL and math.floor((len or 0) / 50) or 0)
+                states[key] = st
+                pollDir(c, key, a, b, first)
+                local prev = not first and cableStates[key]
+                if not first and not prev and ((emptiedAt[a] and now() - emptiedAt[a] < RETURN_SECONDS)
+                    or (emptiedAt[b] and now() - emptiedAt[b] < RETURN_SECONDS)) then
+                    returned[key] = now() + RETURN_SECONDS
+                    log("kabel %s: båtens egen lina tillbaka i tömt uttag, skickas inte", key)
+                end
+                if returned[key] then
+                    if returned[key] > now() then prev = st else returned[key] = nil prev = prev or st end
+                end
+                if not first and not prev then
+                    local okN, near = pcall(nearPlayer, c)
+                    -- A cable in our own body was just plugged in by us: the
+                    -- host's charging cable laid in the first minute was taken
+                    -- for a loaded one and never reached the guest (2026-11-15).
+                    local okB, body = pcall(function() return keyOf(localPC().Pawn) .. "#" end)
+                    local inBody = okB and (a:sub(1, #body) == body or b:sub(1, #body) == body)
+                    -- Plugged at both ends near us at first sight: laid by us
+                    -- between two polls (the second mooring line, 2026-11-16).
+                    -- A saved one has the same id in the other game, which then
+                    -- only finds it there.
+                    local okE, nearEnd = pcall(endNearPlayer, c)
+                    local laidByUs = plugCount(st) == 2 and okE and nearEnd
+                    if not inBody and not laidByUs and (now() - baselineAt < LOAD_GRACE or not (okN and near)) then
+                        settling[key] = { untilT = now() + SETTLE_SECONDS, from = st }
+                        log("kabel %s: inladdad (%s), skickas inte", key, st)
+                    else
+                        -- Laid by us: sent as ours ("h"/"g" + id, props.markOwn).
+                        local pcN = c:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
+                        local rawId = pcN and pcN:IsValid() and tostring(pcN.PersistentUniqueId)
+                        if rawId and not copies[rawId] then
+                            props.markOwn(rawId)
+                            local okK2, key2 = pcall(keyOf, c)
+                            if okK2 and key2 ~= key then
+                                states[key] = nil
+                                key = key2
+                                states[key] = st
+                            end
                         end
                     end
                 end
-            end
-            -- The boat's mooring sockets bring back a built-in line when they
-            -- are emptied; it looks loaded, and the player plugging it into
-            -- the quay within the settling seconds was swallowed: the other
-            -- game never saw the line (2026-11-16). A plug-in within reach of
-            -- the own player ends the settling.
-            local s = settling[key]
-            if s and s.untilT > now() then
-                local okE, near = pcall(endNearPlayer, c)
-                if plugCount(st) > plugCount(s.from) and okE and near then
+                -- The boat's mooring sockets bring back a built-in line when they
+                -- are emptied; it looks loaded, and the player plugging it into
+                -- the quay within the settling seconds was swallowed: the other
+                -- game never saw the line (2026-11-16). A plug-in within reach of
+                -- the own player ends the settling.
+                local s = settling[key]
+                if s and s.untilT > now() then
+                    local okE, near = pcall(endNearPlayer, c)
+                    if plugCount(st) > plugCount(s.from) and okE and near then
+                        settling[key] = nil
+                        prev = s.from
+                        log("kabel %s: inladdad men inkopplad av mig (%s -> %s)", key, s.from, st)
+                    else
+                        prev = st
+                    end
+                elseif s then
                     settling[key] = nil
-                    prev = s.from
-                    log("kabel %s: inladdad men inkopplad av mig (%s -> %s)", key, s.from, st)
-                else
-                    prev = st
                 end
-            elseif s then
-                settling[key] = nil
-            end
-            local plugsChanged = not prev or prev:match("^(.*)|[^|]*$") ~= a .. "|" .. b
-            local pc = c:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
-            local isCopy = pc and pc:IsValid() and copies[tostring(pc.PersistentUniqueId)]
-            -- Copies only report plug changes; their length follows the owner's.
-            if not first and prev and plugsChanged and not isCopy and plugCount(st) > plugCount(prev)
-                and (applyingCable[key] or 0) <= now() then
-                local okE, near = pcall(endNearPlayer, c)
-                if okE and not near then
-                    log("kabel %s: kopplades in långt från spelaren (%s -> %s), skickas inte", key, prev, st)
-                    prev = st
-                    plugsChanged = false
+                local plugsChanged = not prev or prev:match("^(.*)|[^|]*$") ~= a .. "|" .. b
+                local pc = c:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
+                local isCopy = pc and pc:IsValid() and copies[tostring(pc.PersistentUniqueId)]
+                -- Copies only report plug changes; their length follows the owner's.
+                if not first and prev and plugsChanged and not isCopy and plugCount(st) > plugCount(prev)
+                    and (applyingCable[key] or 0) <= now() then
+                    local okE, near = pcall(endNearPlayer, c)
+                    if okE and not near then
+                        log("kabel %s: kopplades in långt från spelaren (%s -> %s), skickas inte", key, prev, st)
+                        prev = st
+                        plugsChanged = false
+                    end
                 end
-            end
-            if not first and prev ~= st and (applyingCable[key] or 0) <= now() and (plugsChanged or not isCopy) then
-                if plugsChanged then
-                    log("kabel %s (%s): %s -> %s", key, className(c), tostring(prev), st)
-                    if not isCopy then claimBoatForMooring(c, key) end
+                if not first and prev ~= st and (applyingCable[key] or 0) <= now() and (plugsChanged or not isCopy) then
+                    if plugsChanged then
+                        log("kabel %s (%s): %s -> %s", key, className(c), tostring(prev), st)
+                        if not isCopy then claimBoatForMooring(c, key) end
+                    end
+                    sendCable(key, c, a, b)
                 end
-                sendCable(key, c, a, b)
             end
         end
     end
+    pass.moored = moored
+    if pass.slice < CABLE_SLICES then return end
+    pass = nil
     if first then
         local n = 0
         for _ in pairs(states) do n = n + 1 end
@@ -726,9 +761,18 @@ local function setLevel(m, t, want)
     end
 end
 
+-- Spread like the cable poll: 757 modules in one tick were 29 ms every 2 s.
+local CHARGE_SLICES = 5
+local chargeSlice
+
 local function sendCharges()
-    if now() - lastCharge < CHARGE_SECONDS then return end
-    lastCharge = now()
+    if not chargeSlice then
+        if now() - lastCharge < CHARGE_SECONDS then return end
+        lastCharge = now()
+        chargeSlice = 0
+    end
+    local slice = chargeSlice
+    chargeSlice = slice + 1 < CHARGE_SLICES and slice + 1 or nil
     local centres = {}
     local pawn = localPC().Pawn
     if pawn and pawn:IsValid() then centres[#centres + 1] = pawn:K2_GetActorLocation() end
@@ -742,7 +786,7 @@ local function sendCharges()
         if #batch > 0 then net.send("charge", table.concat(batch, ";")) batch = {} end
     end
     for _, m in ipairs((ok and found) or {}) do
-        pcall(function()
+        if inSlice(m, slice, CHARGE_SLICES) then pcall(function()
             -- Distance first: the name check on every module of the world
             -- made this a 30 ms stall every 2 s (2026-11-17).
             if not m:IsValid() then return end
@@ -768,7 +812,7 @@ local function sendCharges()
             if not any then return end
             batch[#batch + 1] = key .. "=" .. table.concat(parts, ",")
             if #batch >= CHARGE_BATCH then flush() end
-        end)
+        end) end
     end
     flush()
 end
@@ -1332,6 +1376,7 @@ local function adoptPending()
                 return
             end
             if cableStates then cableStates[p.key] = p.sockA .. "|" .. p.sockB end
+            if pass and pass.states[p.key] then pass.states[p.key] = p.sockA .. "|" .. p.sockB end
             log("kabel %s: standardlängd max %s, kabel %s", p.key, lengthOf(c))
             applyCable(c, p.key, p.sockA, p.sockB, p.class, p.maxLen, p.len)
             return
@@ -1390,6 +1435,30 @@ function M.init(netModule, logFn, localPCFn, nowFn, propsModule, consoleFn, host
 end
 
 local worldSince
+-- Time per part of the tick, logged every 5 s as "power-delar" when a part
+-- reaches 5 ms (the whole module is only one entry in the diagnos line).
+local partCost, partAt = {}, os.clock()
+local function part(name, fn)
+    local c0 = os.clock()
+    local ok, err = pcall(fn)
+    local ms = (os.clock() - c0) * 1000
+    local e = partCost[name] or { sum = 0, max = 0, n = 0 }
+    e.sum, e.n = e.sum + ms, e.n + 1
+    if ms > e.max then e.max = ms end
+    partCost[name] = e
+    return ok, err
+end
+local function logParts()
+    if os.clock() - partAt < 5 then return end
+    partAt = os.clock()
+    local out, slow = {}, false
+    for name, e in pairs(partCost) do
+        out[#out + 1] = string.format("%s %.1f/%.0f", name, e.sum / 5, e.max)
+        if e.max >= 5 then slow = true end
+    end
+    partCost = {}
+    if slow then log("power-delar (ms per s/max): %s", table.concat(out, ", ")) end
+end
 function M.tick()
     worldSince = worldSince or now()
     if now() - worldSince < 0 then return end
@@ -1399,7 +1468,7 @@ function M.tick()
         if now() > w.untilT then dirWaiting[key] = nil log("kabel %s: riktning, kabeln kom aldrig", key)
         else pcall(handleDir, w.msg) end
     end
-    local okR, errR = pcall(runRetries)
+    local okR, errR = part("omförsök", runRetries)
     if not okR then log("kabel-omförsök fel: %s", tostring(errR)) end
     if snapshotWanted then
         snapshotWanted = false
@@ -1454,16 +1523,17 @@ function M.tick()
         end)
         if not okF then follow[key] = nil end
     end
-    local okM, errM = pcall(keepMooringCopies)
+    local okM, errM = part("förtöjningskopior", keepMooringCopies)
     if not okM then log("kabel-fel: %s", tostring(errM)) end
-    local okA, errA = pcall(adoptPending)
+    local okA, errA = part("adoptera", adoptPending)
     if not okA then log("kabel-fel: %s", tostring(errA)) end
-    local ok, err = pcall(pollCables)
+    local ok, err = part("kabelsvep", pollCables)
     if not ok then log("kabel-fel: %s", tostring(err)) end
     if isHost then
-        local okC, errC = pcall(sendCharges)
+        local okC, errC = part("laddning", sendCharges)
         if not okC then log("el-fel: %s", tostring(errC)) end
     end
+    logParts()
 end
 
 M.findSocket, M.stateOf, M.keyOf, M.resolve = findSocket, stateOf, keyOf, resolve
@@ -1499,6 +1569,7 @@ function M.reset()
     goneEarly, consumedOf, looseInfo, retries, dirStates, chargeMiss = {}, {}, {}, {}, {}, {}
     spawnLog, skippedMooring, blockedEnds, deferred, limited = {}, {}, {}, {}, {}
     snapshotWanted, worldSince = false, nil
+    pass, chargeSlice = nil, nil
 end
 
 return M

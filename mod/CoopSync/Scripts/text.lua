@@ -18,7 +18,7 @@ local S = {
         respawn_boat = "Respawn on the boat", respawn_start = "Respawn where the world started",
         respawn_friend = "Respawn next to your friend",
         report_bug = "Report a multiplayer bug", report_hint = "What happened? (short)", send = "Send",
-        report_crash = "Last session crashed - send a report", report_last = "Report a problem from last session",
+        report_crash = "Last session crashed - send a report", report_last = "Report last session",
         dont_send = "Don't send", report_sending = "Sending report…", report_sent = "Report sent, thank you",
         report_failed = "Couldn't send report: %s", report_disabled = "Reports are not set up in this build",
         power_choices = "Friend: J give power, K take power", power_giving = "Giving power (J stops)",
@@ -35,7 +35,7 @@ local S = {
         add_friend = "Add friend", remove_question = "Remove %s?", no_worlds = "No multiplayer worlds yet",
         player_name = "Player name: %s", player_hint = "Your name", player_n = "Player %s", st_lan = "%s  playing on LAN",
         join_lan = "Join %s (LAN, %s)", host_online = "Host online (Steam)", host_lan = "Host on LAN", join_ip = "Join by IP address", ip_hint = "IP or name, e.g. 192.168.1.20", connect = "Connect", bad_ip = "Not an address", ip_unknown = "Can't find %s",
-        play_online = "Play %s online (Steam)", play_lan = "Play %s on LAN",
+        play_online = "Play Steam: %s", play_lan = "Play LAN: %s",
         host_lost_title = "The host is gone", host_lost_body = "No contact with %s. Wait for the host to come back, or quit to the main menu?",
         host_lost_wait = "Wait for the host", host_lost_quit = "Quit",
         join_in_world = "Quit to the main menu first to join",
@@ -61,7 +61,7 @@ local S = {
         respawn_boat = "Återuppstå på båten", respawn_start = "Återuppstå där världen startade",
         respawn_friend = "Återuppstå vid kompisen",
         report_bug = "Rapportera multiplayerfel", report_hint = "Vad hände? (kort)", send = "Skicka",
-        report_crash = "Förra sessionen kraschade - skicka rapport", report_last = "Rapportera fel från förra sessionen",
+        report_crash = "Förra sessionen kraschade - skicka rapport", report_last = "Rapportera förra sessionen",
         dont_send = "Skicka inte", report_sending = "Skickar rapport…", report_sent = "Rapporten skickad, tack",
         report_failed = "Kunde inte skicka: %s", report_disabled = "Rapporter är inte inställda i den här versionen",
         power_choices = "Kompis: J ge ström, K ta ström", power_giving = "Ger ström (J stoppar)",
@@ -78,7 +78,7 @@ local S = {
         add_friend = "Lägg till vän", remove_question = "Ta bort %s?", no_worlds = "Inga multiplayer-världar än",
         player_name = "Spelarnamn: %s", player_hint = "Ditt namn", player_n = "Spelare %s", st_lan = "%s  spelar på LAN",
         join_lan = "Anslut till %s (LAN, %s)", host_online = "Hosta online (Steam)", host_lan = "Hosta på LAN", join_ip = "Anslut via IP-adress", ip_hint = "IP eller namn, t.ex. 192.168.1.20", connect = "Anslut", bad_ip = "Inte en adress", ip_unknown = "Hittar inte %s",
-        play_online = "Spela %s online (Steam)", play_lan = "Spela %s på LAN",
+        play_online = "Spela Steam: %s", play_lan = "Spela LAN: %s",
         host_lost_title = "Värden är borta", host_lost_body = "Ingen kontakt med %s. Vänta på att värden kommer tillbaka, eller avsluta till huvudmenyn?",
         host_lost_wait = "Vänta på värden", host_lost_quit = "Avsluta",
         join_in_world = "Gå till huvudmenyn först för att ansluta",
@@ -102,7 +102,7 @@ local S = {
         respawn_boat = "Auf dem Boot wiederbeleben", respawn_start = "Am Startpunkt der Welt wiederbeleben",
         respawn_friend = "Beim Freund wiederbeleben",
         report_bug = "Mehrspieler-Fehler melden", report_hint = "Was ist passiert? (kurz)", send = "Senden",
-        report_crash = "Letzte Sitzung abgestürzt - Bericht senden", report_last = "Problem der letzten Sitzung melden",
+        report_crash = "Letzte Sitzung abgestürzt - Bericht senden", report_last = "Letzte Sitzung melden",
         dont_send = "Nicht senden", report_sending = "Sende Bericht…", report_sent = "Bericht gesendet, danke",
         report_failed = "Bericht konnte nicht gesendet werden: %s", report_disabled = "Berichte sind in diesem Build nicht eingerichtet",
         power_choices = "Freund: J Strom geben, K Strom nehmen", power_giving = "Gebe Strom (J stoppt)",
@@ -119,7 +119,7 @@ local S = {
         add_friend = "Freund hinzufügen", remove_question = "%s entfernen?", no_worlds = "Noch keine Mehrspieler-Welten",
         player_name = "Spielername: %s", player_hint = "Dein Name", player_n = "Spieler %s", st_lan = "%s  spielt im LAN",
         join_lan = "%s beitreten (LAN, %s)", host_online = "Online hosten (Steam)", host_lan = "Im LAN hosten", join_ip = "Per IP-Adresse beitreten", ip_hint = "IP oder Name, z. B. 192.168.1.20", connect = "Verbinden", bad_ip = "Keine Adresse", ip_unknown = "%s nicht gefunden",
-        play_online = "%s online spielen (Steam)", play_lan = "%s im LAN spielen",
+        play_online = "Steam spielen: %s", play_lan = "LAN spielen: %s",
         host_lost_title = "Der Host ist weg", host_lost_body = "Kein Kontakt zu %s. Auf den Host warten oder zum Hauptmenü zurückkehren?",
         host_lost_wait = "Auf den Host warten", host_lost_quit = "Beenden",
         join_in_world = "Zum Beitreten zuerst ins Hauptmenü zurückkehren",
@@ -144,7 +144,7 @@ local S = {
         respawn_boat = "Réapparaître sur le bateau", respawn_start = "Réapparaître au départ du monde",
         respawn_friend = "Réapparaître près de votre ami",
         report_bug = "Signaler un bug multijoueur", report_hint = "Que s'est-il passé ? (court)", send = "Envoyer",
-        report_crash = "La dernière session a planté - envoyer un rapport", report_last = "Signaler un problème de la dernière session",
+        report_crash = "La dernière session a planté - envoyer un rapport", report_last = "Signaler la dernière session",
         dont_send = "Ne pas envoyer", report_sending = "Envoi du rapport…", report_sent = "Rapport envoyé, merci",
         report_failed = "Impossible d'envoyer le rapport : %s", report_disabled = "Les rapports ne sont pas configurés dans cette version",
         power_choices = "Ami : J donner du courant, K prendre du courant", power_giving = "Courant donné (J arrête)",
@@ -161,7 +161,7 @@ local S = {
         add_friend = "Ajouter un ami", remove_question = "Retirer %s ?", no_worlds = "Aucun monde multijoueur pour l'instant",
         player_name = "Nom du joueur : %s", player_hint = "Ton nom", player_n = "Joueur %s", st_lan = "%s  joue en LAN",
         join_lan = "Rejoindre %s (LAN, %s)", host_online = "Héberger en ligne (Steam)", host_lan = "Héberger en LAN", join_ip = "Rejoindre par adresse IP", ip_hint = "IP ou nom, ex. 192.168.1.20", connect = "Se connecter", bad_ip = "Pas une adresse", ip_unknown = "%s introuvable",
-        play_online = "Jouer %s en ligne (Steam)", play_lan = "Jouer %s en LAN",
+        play_online = "Jouer Steam : %s", play_lan = "Jouer LAN : %s",
         host_lost_title = "L'hôte est parti", host_lost_body = "Aucun contact avec %s. Attendre le retour de l'hôte ou quitter vers le menu principal ?",
         host_lost_wait = "Attendre l'hôte", host_lost_quit = "Quitter",
         join_in_world = "Quitte d'abord vers le menu principal pour rejoindre",
@@ -186,7 +186,7 @@ local S = {
         respawn_boat = "Reaparecer en el barco", respawn_start = "Reaparecer donde empezó el mundo",
         respawn_friend = "Reaparecer junto a tu amigo",
         report_bug = "Informar de un error del multijugador", report_hint = "¿Qué ha pasado? (breve)", send = "Enviar",
-        report_crash = "La última sesión se cerró inesperadamente - enviar informe", report_last = "Informar de un problema de la última sesión",
+        report_crash = "La última sesión se cerró inesperadamente - enviar informe", report_last = "Informar última sesión",
         dont_send = "No enviar", report_sending = "Enviando informe…", report_sent = "Informe enviado, gracias",
         report_failed = "No se pudo enviar el informe: %s", report_disabled = "Los informes no están configurados en esta versión",
         power_choices = "Amigo: J dar energía, K tomar energía", power_giving = "Dando energía (J para)",
@@ -203,7 +203,7 @@ local S = {
         add_friend = "Añadir amigo", remove_question = "¿Quitar a %s?", no_worlds = "Aún no hay mundos multijugador",
         player_name = "Nombre del jugador: %s", player_hint = "Tu nombre", player_n = "Jugador %s", st_lan = "%s  juega en LAN",
         join_lan = "Unirse a %s (LAN, %s)", host_online = "Alojar en línea (Steam)", host_lan = "Alojar en LAN", join_ip = "Unirse por dirección IP", ip_hint = "IP o nombre, p. ej. 192.168.1.20", connect = "Conectar", bad_ip = "No es una dirección", ip_unknown = "No se encuentra %s",
-        play_online = "Jugar %s en línea (Steam)", play_lan = "Jugar %s en LAN",
+        play_online = "Jugar Steam: %s", play_lan = "Jugar LAN: %s",
         host_lost_title = "El anfitrión se ha ido", host_lost_body = "Sin contacto con %s. ¿Esperar a que vuelva el anfitrión o salir al menú principal?",
         host_lost_wait = "Esperar al anfitrión", host_lost_quit = "Salir",
         join_in_world = "Sal primero al menú principal para unirte",
@@ -228,7 +228,7 @@ local S = {
         respawn_boat = "Renascer no barco", respawn_start = "Renascer onde o mundo começou",
         respawn_friend = "Renascer perto do seu amigo",
         report_bug = "Relatar um bug do multijogador", report_hint = "O que aconteceu? (curto)", send = "Enviar",
-        report_crash = "A última sessão travou - enviar relatório", report_last = "Relatar um problema da última sessão",
+        report_crash = "A última sessão travou - enviar relatório", report_last = "Relatar última sessão",
         dont_send = "Não enviar", report_sending = "Enviando relatório…", report_sent = "Relatório enviado, obrigado",
         report_failed = "Não foi possível enviar o relatório: %s", report_disabled = "Relatórios não estão configurados nesta versão",
         power_choices = "Amigo: J dar energia, K pegar energia", power_giving = "Dando energia (J para)",
@@ -245,7 +245,7 @@ local S = {
         add_friend = "Adicionar amigo", remove_question = "Remover %s?", no_worlds = "Ainda não há mundos multijogador",
         player_name = "Nome do jogador: %s", player_hint = "Seu nome", player_n = "Jogador %s", st_lan = "%s  jogando em LAN",
         join_lan = "Entrar com %s (LAN, %s)", host_online = "Hospedar online (Steam)", host_lan = "Hospedar em LAN", join_ip = "Entrar por endereço IP", ip_hint = "IP ou nome, ex. 192.168.1.20", connect = "Conectar", bad_ip = "Não é um endereço", ip_unknown = "%s não encontrado",
-        play_online = "Jogar %s online (Steam)", play_lan = "Jogar %s em LAN",
+        play_online = "Jogar Steam: %s", play_lan = "Jogar LAN: %s",
         host_lost_title = "O anfitrião saiu", host_lost_body = "Sem contato com %s. Esperar o anfitrião voltar ou sair para o menu principal?",
         host_lost_wait = "Esperar o anfitrião", host_lost_quit = "Sair",
         join_in_world = "Saia primeiro para o menu principal para entrar",
@@ -270,7 +270,7 @@ local S = {
         respawn_boat = "Rinasci sulla barca", respawn_start = "Rinasci dove è iniziato il mondo",
         respawn_friend = "Rinasci accanto al tuo amico",
         report_bug = "Segnala un bug del multigiocatore", report_hint = "Cosa è successo? (breve)", send = "Invia",
-        report_crash = "L'ultima sessione si è bloccata - invia una segnalazione", report_last = "Segnala un problema dell'ultima sessione",
+        report_crash = "L'ultima sessione si è bloccata - invia una segnalazione", report_last = "Segnala ultima sessione",
         dont_send = "Non inviare", report_sending = "Invio della segnalazione…", report_sent = "Segnalazione inviata, grazie",
         report_failed = "Impossibile inviare la segnalazione: %s", report_disabled = "Le segnalazioni non sono configurate in questa versione",
         power_choices = "Amico: J dai energia, K prendi energia", power_giving = "Dai energia (J ferma)",
@@ -287,7 +287,7 @@ local S = {
         add_friend = "Aggiungi amico", remove_question = "Rimuovere %s?", no_worlds = "Ancora nessun mondo multigiocatore",
         player_name = "Nome giocatore: %s", player_hint = "Il tuo nome", player_n = "Giocatore %s", st_lan = "%s  gioca in LAN",
         join_lan = "Unisciti a %s (LAN, %s)", host_online = "Ospita online (Steam)", host_lan = "Ospita in LAN", join_ip = "Unisciti tramite indirizzo IP", ip_hint = "IP o nome, es. 192.168.1.20", connect = "Connetti", bad_ip = "Non è un indirizzo", ip_unknown = "Impossibile trovare %s",
-        play_online = "Gioca %s online (Steam)", play_lan = "Gioca %s in LAN",
+        play_online = "Gioca Steam: %s", play_lan = "Gioca LAN: %s",
         host_lost_title = "L'host se n'è andato", host_lost_body = "Nessun contatto con %s. Aspettare che l'host torni o uscire al menu principale?",
         host_lost_wait = "Aspetta l'host", host_lost_quit = "Esci",
         join_in_world = "Esci prima al menu principale per unirti",
@@ -312,7 +312,7 @@ local S = {
         respawn_boat = "Odrodź się na łodzi", respawn_start = "Odrodź się na początku świata",
         respawn_friend = "Odrodź się przy znajomym",
         report_bug = "Zgłoś błąd trybu wieloosobowego", report_hint = "Co się stało? (krótko)", send = "Wyślij",
-        report_crash = "Ostatnia sesja uległa awarii - wyślij raport", report_last = "Zgłoś problem z ostatniej sesji",
+        report_crash = "Ostatnia sesja uległa awarii - wyślij raport", report_last = "Zgłoś ostatnią sesję",
         dont_send = "Nie wysyłaj", report_sending = "Wysyłanie raportu…", report_sent = "Raport wysłany, dziękujemy",
         report_failed = "Nie udało się wysłać raportu: %s", report_disabled = "Raporty nie są skonfigurowane w tej wersji",
         power_choices = "Znajomy: J daj prąd, K weź prąd", power_giving = "Dajesz prąd (J zatrzymuje)",
@@ -329,7 +329,7 @@ local S = {
         add_friend = "Dodaj znajomego", remove_question = "Usunąć %s?", no_worlds = "Brak światów wieloosobowych",
         player_name = "Nazwa gracza: %s", player_hint = "Twoja nazwa", player_n = "Gracz %s", st_lan = "%s  gra w sieci LAN",
         join_lan = "Dołącz do %s (LAN, %s)", host_online = "Hostuj online (Steam)", host_lan = "Hostuj w sieci LAN", join_ip = "Dołącz przez adres IP", ip_hint = "IP lub nazwa, np. 192.168.1.20", connect = "Połącz", bad_ip = "To nie jest adres", ip_unknown = "Nie można znaleźć %s",
-        play_online = "Graj %s online (Steam)", play_lan = "Graj %s w sieci LAN",
+        play_online = "Graj Steam: %s", play_lan = "Graj LAN: %s",
         host_lost_title = "Host zniknął", host_lost_body = "Brak kontaktu z %s. Poczekać na powrót hosta czy wyjść do menu głównego?",
         host_lost_wait = "Czekaj na hosta", host_lost_quit = "Wyjdź",
         join_in_world = "Aby dołączyć, najpierw wyjdź do menu głównego",
@@ -354,7 +354,7 @@ local S = {
         respawn_boat = "Возродиться на лодке", respawn_start = "Возродиться в начале мира",
         respawn_friend = "Возродиться рядом с другом",
         report_bug = "Сообщить об ошибке мультиплеера", report_hint = "Что случилось? (кратко)", send = "Отправить",
-        report_crash = "Прошлая сессия завершилась сбоем - отправить отчёт", report_last = "Сообщить о проблеме прошлой сессии",
+        report_crash = "Прошлая сессия завершилась сбоем - отправить отчёт", report_last = "Сообщить о прошлой сессии",
         dont_send = "Не отправлять", report_sending = "Отправка отчёта…", report_sent = "Отчёт отправлен, спасибо",
         report_failed = "Не удалось отправить отчёт: %s", report_disabled = "Отчёты не настроены в этой сборке",
         power_choices = "Друг: J дать энергию, K взять энергию", power_giving = "Отдаёшь энергию (J — стоп)",
@@ -371,7 +371,7 @@ local S = {
         add_friend = "Добавить друга", remove_question = "Удалить %s?", no_worlds = "Пока нет миров для совместной игры",
         player_name = "Имя игрока: %s", player_hint = "Твоё имя", player_n = "Игрок %s", st_lan = "%s  играет по LAN",
         join_lan = "Присоединиться к %s (LAN, %s)", host_online = "Хостить онлайн (Steam)", host_lan = "Хостить по LAN", join_ip = "Войти по IP-адресу", ip_hint = "IP или имя, напр. 192.168.1.20", connect = "Подключиться", bad_ip = "Это не адрес", ip_unknown = "Не удаётся найти %s",
-        play_online = "Играть %s онлайн (Steam)", play_lan = "Играть %s по LAN",
+        play_online = "Играть Steam: %s", play_lan = "Играть LAN: %s",
         host_lost_title = "Хост пропал", host_lost_body = "Нет связи с %s. Подождать хоста или выйти в главное меню?",
         host_lost_wait = "Ждать хоста", host_lost_quit = "Выйти",
         join_in_world = "Чтобы присоединиться, сначала выйди в главное меню",
@@ -396,7 +396,7 @@ local S = {
         respawn_boat = "Відродитися на човні", respawn_start = "Відродитися на початку світу",
         respawn_friend = "Відродитися поруч із другом",
         report_bug = "Повідомити про помилку мультиплеєра", report_hint = "Що сталося? (коротко)", send = "Надіслати",
-        report_crash = "Минула сесія завершилася збоєм - надіслати звіт", report_last = "Повідомити про проблему минулої сесії",
+        report_crash = "Минула сесія завершилася збоєм - надіслати звіт", report_last = "Повідомити про минулу сесію",
         dont_send = "Не надсилати", report_sending = "Надсилання звіту…", report_sent = "Звіт надіслано, дякуємо",
         report_failed = "Не вдалося надіслати звіт: %s", report_disabled = "Звіти не налаштовані в цій збірці",
         power_choices = "Друг: J дати енергію, K взяти енергію", power_giving = "Віддаєш енергію (J — стоп)",
@@ -413,7 +413,7 @@ local S = {
         add_friend = "Додати друга", remove_question = "Видалити %s?", no_worlds = "Поки немає світів для спільної гри",
         player_name = "Ім'я гравця: %s", player_hint = "Твоє ім'я", player_n = "Гравець %s", st_lan = "%s  грає по LAN",
         join_lan = "Приєднатися до %s (LAN, %s)", host_online = "Хостити онлайн (Steam)", host_lan = "Хостити по LAN", join_ip = "Увійти за IP-адресою", ip_hint = "IP або ім'я, напр. 192.168.1.20", connect = "Підключитися", bad_ip = "Це не адреса", ip_unknown = "Не вдається знайти %s",
-        play_online = "Грати %s онлайн (Steam)", play_lan = "Грати %s по LAN",
+        play_online = "Грати Steam: %s", play_lan = "Грати LAN: %s",
         host_lost_title = "Хост зник", host_lost_body = "Немає зв'язку з %s. Зачекати на хоста чи вийти в головне меню?",
         host_lost_wait = "Чекати на хоста", host_lost_quit = "Вийти",
         join_in_world = "Щоб приєднатися, спершу вийди в головне меню",
@@ -438,7 +438,7 @@ local S = {
         respawn_boat = "Herää veneellä", respawn_start = "Herää maailman alkupisteessä",
         respawn_friend = "Herää kaverin luona",
         report_bug = "Ilmoita moninpelin virheestä", report_hint = "Mitä tapahtui? (lyhyesti)", send = "Lähetä",
-        report_crash = "Edellinen istunto kaatui - lähetä raportti", report_last = "Ilmoita edellisen istunnon ongelmasta",
+        report_crash = "Edellinen istunto kaatui - lähetä raportti", report_last = "Ilmoita edellinen istunto",
         dont_send = "Älä lähetä", report_sending = "Lähetetään raporttia…", report_sent = "Raportti lähetetty, kiitos",
         report_failed = "Raportin lähetys epäonnistui: %s", report_disabled = "Raportteja ei ole otettu käyttöön tässä versiossa",
         power_choices = "Kaveri: J anna virtaa, K ota virtaa", power_giving = "Annat virtaa (J lopettaa)",
@@ -455,7 +455,7 @@ local S = {
         add_friend = "Lisää kaveri", remove_question = "Poistetaanko %s?", no_worlds = "Ei vielä moninpelimaailmoja",
         player_name = "Pelaajan nimi: %s", player_hint = "Nimesi", player_n = "Pelaaja %s", st_lan = "%s  pelaa lähiverkossa",
         join_lan = "Liity: %s (LAN, %s)", host_online = "Isännöi verkossa (Steam)", host_lan = "Isännöi lähiverkossa", join_ip = "Liity IP-osoitteella", ip_hint = "IP tai nimi, esim. 192.168.1.20", connect = "Yhdistä", bad_ip = "Ei ole osoite", ip_unknown = "%s ei löydy",
-        play_online = "Pelaa %s verkossa (Steam)", play_lan = "Pelaa %s lähiverkossa",
+        play_online = "Pelaa Steam: %s", play_lan = "Pelaa LAN: %s",
         host_lost_title = "Isäntä on poissa", host_lost_body = "Ei yhteyttä: %s. Odotetaanko isäntää vai palataanko päävalikkoon?",
         host_lost_wait = "Odota isäntää", host_lost_quit = "Lopeta",
         join_in_world = "Palaa ensin päävalikkoon liittyäksesi",
@@ -480,7 +480,7 @@ local S = {
         respawn_boat = "ボートでリスポーン", respawn_start = "ワールドの開始地点でリスポーン",
         respawn_friend = "フレンドの近くでリスポーン",
         report_bug = "マルチプレイのバグを報告", report_hint = "何が起きましたか? (短く)", send = "送信",
-        report_crash = "前回のセッションがクラッシュしました - レポートを送信", report_last = "前回のセッションの問題を報告",
+        report_crash = "前回のセッションがクラッシュしました - レポートを送信", report_last = "前回のセッションを報告",
         dont_send = "送信しない", report_sending = "レポートを送信中…", report_sent = "レポートを送信しました。ありがとうございます",
         report_failed = "レポートを送信できませんでした: %s", report_disabled = "このビルドではレポートが設定されていません",
         power_choices = "フレンド: J 電力を渡す、K 電力をもらう", power_giving = "電力を渡しています (J で停止)",
@@ -497,7 +497,7 @@ local S = {
         add_friend = "フレンドを追加", remove_question = "%s を削除しますか?", no_worlds = "マルチプレイのワールドはまだありません",
         player_name = "プレイヤー名: %s", player_hint = "あなたの名前", player_n = "プレイヤー %s", st_lan = "%s  LAN でプレイ中",
         join_lan = "%s に参加 (LAN、%s)", host_online = "オンラインでホスト (Steam)", host_lan = "LAN でホスト", join_ip = "IP アドレスで参加", ip_hint = "IP または名前 (例: 192.168.1.20)", connect = "接続", bad_ip = "アドレスではありません", ip_unknown = "%s が見つかりません",
-        play_online = "%s をオンラインでプレイ (Steam)", play_lan = "%s を LAN でプレイ",
+        play_online = "Steamでプレイ: %s", play_lan = "LANでプレイ: %s",
         host_lost_title = "ホストがいなくなりました", host_lost_body = "%s と連絡が取れません。ホストの復帰を待ちますか、それともメインメニューに戻りますか?",
         host_lost_wait = "ホストを待つ", host_lost_quit = "終了",
         join_in_world = "参加するには先にメインメニューに戻ってください",
@@ -522,7 +522,7 @@ local S = {
         respawn_boat = "在船上重生", respawn_start = "在世界起点重生",
         respawn_friend = "在好友身边重生",
         report_bug = "报告多人游戏错误", report_hint = "发生了什么? (简短)", send = "发送",
-        report_crash = "上次会话崩溃了 - 发送报告", report_last = "报告上次会话的问题",
+        report_crash = "上次会话崩溃了 - 发送报告", report_last = "报告上次会话",
         dont_send = "不发送", report_sending = "正在发送报告…", report_sent = "报告已发送，谢谢",
         report_failed = "无法发送报告: %s", report_disabled = "此版本未设置报告功能",
         power_choices = "好友: J 给予电力，K 获取电力", power_giving = "正在给予电力 (J 停止)",
@@ -539,7 +539,7 @@ local S = {
         add_friend = "添加好友", remove_question = "移除 %s?", no_worlds = "还没有多人游戏世界",
         player_name = "玩家名称: %s", player_hint = "你的名字", player_n = "玩家 %s", st_lan = "%s  正在局域网游玩",
         join_lan = "加入 %s (局域网，%s)", host_online = "在线主持 (Steam)", host_lan = "在局域网主持", join_ip = "通过 IP 地址加入", ip_hint = "IP 或名称，例如 192.168.1.20", connect = "连接", bad_ip = "不是地址", ip_unknown = "找不到 %s",
-        play_online = "在线游玩 %s (Steam)", play_lan = "在局域网游玩 %s",
+        play_online = "Steam 游玩: %s", play_lan = "局域网游玩: %s",
         host_lost_title = "主机已离开", host_lost_body = "与 %s 失去联系。等待主机回来，还是退出到主菜单?",
         host_lost_wait = "等待主机", host_lost_quit = "退出",
         join_in_world = "请先退出到主菜单再加入",
@@ -551,7 +551,26 @@ local S = {
 
 local IL = "/Script/Engine.Default__KismetInternationalizationLibrary"
 
+-- The game's own language setting (EVoyageLanguageType); the engine culture stays
+-- "en" when the player picks a language in the options (2026-11-24). 0 = System.
+local BY_SETTING = { [1] = "en", [2] = "fi", [3] = "fr", [4] = "de", [5] = "ja", [6] = "zh", [7] = "es",
+    [8] = "pt", [9] = "sv", [10] = "pl", [11] = "ru", [12] = "uk", [13] = "it", [14] = "es" }
+local settings
+
+local function fromSetting()
+    if not (settings and settings:IsValid()) then
+        settings = nil
+        for _, o in ipairs(FindAllOf("VoyageGameUserSettings") or {}) do
+            if o:IsValid() and not o:GetFullName():find("Default__", 1, true) then settings = o break end
+        end
+        if not settings then return nil end
+    end
+    return BY_SETTING[settings.CustomSettings.LanguageType]
+end
+
 local function lang()
+    local okS, s = pcall(fromSetting)
+    if okS and s then return s end
     local ok, l = pcall(function() return StaticFindObject(IL):GetCurrentLanguage():ToString() end)
     l = (ok and l or ""):lower()
     local base = l:match("^(%a%a)") or "en"

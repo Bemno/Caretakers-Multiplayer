@@ -52,6 +52,15 @@ local peerinv = require("peerinv")
 local peerpower = require("peerpower")
 local text = require("text")
 local bugreport = require("bugreport")
+-- Local additions on the developer's machine (not released): lokal\ next to Scripts.
+local function localModule(name)
+    local f = loadfile("ue4ss/Mods/CoopSync/lokal/" .. name .. ".lua")
+    if not f then return nil end
+    local ok, m = pcall(f)
+    return ok and m or nil
+end
+local NOOP = function() end
+local grafik = localModule("grafik") or { init = NOOP, tick = NOOP, enter = NOOP, leave = NOOP }
 
 local function arg(cmdline, key)
     return cmdline:match("%-" .. key .. "=(%S+)")
@@ -910,6 +919,7 @@ local worldTurn, worldNext = 0, 0
 
 local function tick()
     timed("lobby", lobby.tick)
+    timed("grafik", grafik.tick)
     timed("vänner", friends.tick)
     if levelName() == "Empty" then
         local okMenu, errMenu = pcall(menu.tick)
@@ -1001,6 +1011,7 @@ drops.init(net, log, localPC, realTime, props)
 local npcFrameAdded = false
 local function setRole(r)
     role = r
+    grafik.enter()
     bugreport.inWorld = true
     props.isHost = r == "host"
     power.init(net, log, localPC, realTime, props, console, r == "host", function() return puppet end)
@@ -1022,10 +1033,11 @@ local function setRole(r)
     -- Recording (F7) is a test bench tool: only with a role from the command line.
     log("roll: %s", r)
 end
+grafik.init(log, cmdline)
 lobby.init(net, log, levelName, setRole, ioName)
 -- Back on the title screen after a session: the sync stops (a guest role left
 -- on would, among other things, stop the swarm spawners in a singleplayer world).
-lobby.onLeave = function() role = nil end
+lobby.onLeave = function() role = nil grafik.leave() end
 friends.init(net, log, lobby, ioName)
 hostlost.init(log, localPC, lobby)
 menu.init(lobby, log, localPC, friends)
@@ -1083,6 +1095,7 @@ Coop = {
     lamp = lamp,
     phone = phone,
     peerpower = peerpower,
+    grafik = grafik,
 }
 -- Test engine: testbank2.ps1 kör drops io/<role>/cmd.lua into the running game
 -- and waits for io/<role>/svar.txt. Runs in the live Lua state instead of

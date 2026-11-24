@@ -542,8 +542,10 @@ local function weldInto(comp, parent)
     return pa ~= nil and pa:IsValid() and pa:GetAddress() == parent:GetAddress(), welded
 end
 
-function M.weldOnBoat(comp, l)
-    local b = boatAt(l)
+-- b: the boat when the caller knows it (a built module hangs on it, at the bow
+-- or on a wall outside boatAt's deck box).
+function M.weldOnBoat(comp, l, b)
+    b = b or boatAt(l)
     local hull = b and hullOf(b)
     if not hull then return end
     local attached, welded = weldInto(comp, hull)

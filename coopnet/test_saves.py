@@ -114,6 +114,19 @@ def test_guard_restores_singleplayer_slots_saved_from_the_game_menu(tmp_path):
     assert not (sp / f"{SID}_4.sav").exists()
 
 
+def test_guard_sets_aside_what_it_replaces_or_removes(tmp_path):
+    s = _tree(tmp_path)
+    s.guard_on()
+    sp = tmp_path / "SaveGames" / SID
+    time.sleep(0.05)
+    (sp / f"{SID}_1.sav").write_bytes(b"nyare singleplayer")
+    (sp / f"{SID}_7.sav").write_bytes(b"ny singleplayer-plats")
+    saves.Saves(str(tmp_path / "SaveGames" / "Coop")).recover_leftover()
+    aside = tmp_path / saves.STORE / saves.TRASH / "singleplayer"
+    kept = sorted(p.read_bytes() for p in aside.iterdir())
+    assert kept == [b"ny singleplayer-plats", b"nyare singleplayer"]
+
+
 def test_guard_leaves_untouched_files_alone(tmp_path):
     s = _tree(tmp_path)
     s.guard_on()

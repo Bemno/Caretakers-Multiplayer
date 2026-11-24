@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.2.16 — 2026-11-24
+
+Less stutter for the host and a fix for the boat spinning after the other player builds on it. Still a beta for 2 players; feedback is very welcome.
+
+- The host no longer gets a small hitch every second: the cable and power sync now spreads its work over several frames (bench: 62 hitches a minute down to 6).
+- Modules the other player builds on the boat (lights, sockets, extenders) are now fixed into the hull like your own. Before, they could push the boat until it spun around or was thrown about, most of all while the second player was driving.
+
 ## 0.2.15 — 2026-11-24
 
 Bug reports from inside the game, a smoother game for both players and a round of sync fixes. Still a beta for 2 players; feedback is very welcome.
