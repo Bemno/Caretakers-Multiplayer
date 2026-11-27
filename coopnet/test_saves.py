@@ -198,3 +198,24 @@ def test_move_all_skips_a_file_the_other_coopnet_moved(tmp_path, monkeypatch):
     monkeypatch.setattr(saves.os, "replace", racing)
     saves._move_all(str(src), str(dst))
     assert (dst / "b.sav").read_text() == "b"
+
+
+def test_guard_on_full_disk_leaves_no_half_vault(tmp_path, monkeypatch):
+    s = _tree(tmp_path)
+    real = saves.shutil.copy2
+    calls = []
+
+    def copy2(src, dst, *a, **k):
+        calls.append(src)
+        if len(calls) == 2:
+            raise OSError(28, "No space left on device")
+        return real(src, dst, *a, **k)
+
+    monkeypatch.setattr(saves.shutil, "copy2", copy2)
+    try:
+        s.guard_on()
+        assert False, "guard_on should raise"
+    except OSError:
+        pass
+    assert not os.path.exists(s.vault)
+    assert not s.in_session

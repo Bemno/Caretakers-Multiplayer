@@ -157,6 +157,7 @@ end
 
 local CABLE_POLL_SECONDS = 1
 local copies = {}           -- local save ids of cables summoned as copies
+local shapeLast = {}        -- key -> the other game's last cable shape, given again to a remade copy
 local lastPoll = 0
 local cableStates               -- key -> state, nil until the first scan
 local applyingCable = {}        -- key -> until time (echo guard)
@@ -1007,12 +1008,21 @@ local function applyCable(cable, key, sockA, sockB, class, maxLen, len)
     -- Unplugging through the game (ReleaseSocketCable) reels the cable into
     -- this player's inventory, so it is never used here.
     if (hereA ~= "-" and hereA ~= sockA) or (hereB ~= "-" and hereB ~= sockB) then
-        if copies[tostring(localId)] then
+        -- A cable from the save is in both games and counts as ours. Unplugged at one end
+        -- by the other player, it was taken for removed: reeled in and refunded here,
+        -- and when they plugged it in again the late messages were ignored, so it never
+        -- came back (bench 2026-11-25, cables missing for the guest). With an end still
+        -- in, it is replaced by a copy like any other unplugged cable.
+        -- Only for a cable we did not lay: one we laid, unplugged by them through their
+        -- copy, is handed over to them as before (that copy is gone in their game).
+        local weLaid = key:sub(1, 2) == (isHost and "ih" or "ig")
+        local oneEndIn = not weLaid and (sockA ~= "-" or sockB ~= "-")
+        if copies[tostring(localId)] or oneEndIn then
             if localId and localId ~= 0 then props.suppressGone(tostring(localId)) end
             -- Our copy of their cable: they unplugged an end and hold it, so
             -- the copy is re-created with only the end that is still in.
             cable:K2_DestroyActor()
-            log("kabel %s: urkopplad hos den andra, kopian borttagen", key)
+            log("kabel %s: urkopplad hos den andra, %s borttagen", key, copies[tostring(localId)] and "kopian" or "vår kabel")
             if sockA ~= "-" or sockB ~= "-" then spawnCopy(key, class or pathOf(cable:GetClass()), sockA, sockB, maxLen, len) end
         else
             -- Our own cable, unplugged by them through their copy (which the
@@ -1306,6 +1316,8 @@ local deferred = {}          -- key -> cable message held until the world has lo
 -- limit. Plugged and unplugged four times in 8 s, the guest's last plug never
 -- reached the host and the recycler ran only for the guest (2026-11-17).
 local limited = {}
+local missingSince = {}      -- key -> when a cable message first named a socket not here yet
+local MISSING_WAIT = 6
 
 local function handleCable(msg)
     local key, class = msg[3], msg[4]
@@ -1321,6 +1333,19 @@ local function handleCable(msg)
     end
     if (givenAway[key] or 0) > now() then return end
     if blockedForGuest(key, sockA) or blockedForGuest(key, sockB) then dropForGuest(key) return end
+    -- An end in something the other just built (a cable extender laid on land) comes a
+    -- second before the build: the copy was made with one end, made again when the
+    -- module came, and hit the copy limit (report 20261124-213026). Held a moment instead.
+    for _, sk in ipairs({ sockA, sockB }) do
+        if sk ~= "-" and sk:sub(1, 1) == "i" and not findSocket(sk) then
+            if not missingSince[key] or now() - missingSince[key] > 30 then missingSince[key] = now() end
+            if now() - missingSince[key] < MISSING_WAIT then
+                limited[key] = { msg = msg, at = now() + 0.5, quiet = true }
+                return
+            end
+        end
+    end
+    missingSince[key] = nil
     local cable = resolve(key)
     if cable then deferred[key] = nil applyCable(cable, key, sockA, sockB, class, maxLen, len) return end
     if key:sub(1, 1) ~= "i" then log("kabel %s finns inte här", key) return end
@@ -1348,6 +1373,16 @@ local function handleCable(msg)
     if not anchored then
         log("kabel %s: inget av uttagen %s|%s finns här, ingen kopia", key, sockA, sockB)
         return
+    end
+    -- A copy already summoned and not yet found takes the newer state: two messages in
+    -- one second made two copies, the second could not get the socket the first held,
+    -- went into the next one, was taken for unplugged and remade until the limit left
+    -- none (bench 2026-11-25, cables gone for the guest).
+    for _, p in ipairs(pendingCables) do
+        if p.key == key then
+            p.class, p.sockA, p.sockB, p.maxLen, p.len = class, sockA, sockB, maxLen, len
+            return
+        end
     end
     log("kabel %s: längd max %s, kabel %s", key, tostring(maxLen), tostring(len))
     local waitUntil = spawnCopy(key, class, sockA, sockB, maxLen, len)
@@ -1379,6 +1414,7 @@ local function adoptPending()
             if pass and pass.states[p.key] then pass.states[p.key] = p.sockA .. "|" .. p.sockB end
             log("kabel %s: standardlängd max %s, kabel %s", p.key, lengthOf(c))
             applyCable(c, p.key, p.sockA, p.sockB, p.class, p.maxLen, p.len)
+            if shapeLast[p.key] then M.wantShape(p.key, shapeLast[p.key]) end
             return
         end
     end
@@ -1422,10 +1458,22 @@ end
 
 function M.setPuppetSocket(fn) puppetSocketPath = fn end
 
+-- They unplugged our cable through their copy while we hold ours (props.lua ignores
+-- their removal): the copy here is now the real cable and sends its shape.
+local function heldOver(actor)
+    local pc = actor:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
+    local id = pc and pc:IsValid() and tostring(pc.PersistentUniqueId)
+    if id and copies[id] then
+        copies[id] = nil
+        log("kabel %s: tagen över här, inte längre kopia", keyOf(actor))
+    end
+end
+
 function M.init(netModule, logFn, localPCFn, nowFn, propsModule, consoleFn, hostRole, puppetFn)
     net, log, localPC, now, props = netModule, logFn, localPCFn, nowFn, propsModule
     puppetOf = puppetFn
     props.goneHook = props_goneHook
+    props.heldGoneHook = heldOver
     -- The cable went before our copy of it existed (the guest unplugged its
     -- charging cable, the game reeled it in at once): the copy then hung at
     -- the puppet in the host's game (2026-11-16).
@@ -1459,6 +1507,182 @@ local function logParts()
     partCost = {}
     if slow then log("power-delar (ms per s/max): %s", table.concat(out, ", ")) end
 end
+-- Cable shape. A laid cable is simulated by the engine's cable component with collision, so
+-- it rests where it was dragged round corners. A copy started as a straight line between
+-- its ends, through the walls, with the slack in loops (user 2026-11-25). Whoever has the
+-- real cable sends its points (the engine's GetCableParticleLocations: CableParticles is
+-- only filled when the game saves); the other game rebuilds its copy along them with
+-- BuildFromSpline, which unplugs both ends, so they are plugged in again at once
+-- (applyCable). Bench 2026-11-25.
+local SHAPE_EVERY, SHAPE_MOVE, SHAPE_PER_TICK, SHAPE_AGAIN = 3, 20, 4, 30
+local lastShapeRound, shapeQueue, shapeSent = -100, {}, {}   -- key -> { pts, at } last sent
+local shapeWanted = {}       -- key -> { pts, t }: received, built once the copy is plugged in
+local shapeBuilt = {}        -- key -> the points the copy was last built along
+local shapeLogged = {}
+local shapeErrLogged = false
+local SPLINE = "/Script/Engine.SplineComponent"
+local IDENTITY = { Translation = { X = 0, Y = 0, Z = 0 }, Rotation = { X = 0, Y = 0, Z = 0, W = 1 }, Scale3D = { X = 1, Y = 1, Z = 1 } }
+
+-- The out parameter comes back as a table of FVectors under number keys.
+local function pointsOf(c)
+    local o = {}
+    c.Cable:GetCableParticleLocations(o)
+    local idx = {}
+    for k in pairs(o) do if type(k) == "number" then idx[#idx + 1] = k end end
+    table.sort(idx)
+    local pts = {}
+    for _, k in ipairs(idx) do
+        local v = o[k]
+        local okG, g = pcall(function() return v:get() end)
+        if okG and g then v = g end
+        pts[#pts + 1] = { X = v.X, Y = v.Y, Z = v.Z }
+    end
+    return pts
+end
+
+-- Whoever has the real cable sends (not a copy), and only copies are rebuilt. A cable
+-- from the save is real in both games until one player moves an end; then the other
+-- has a copy and the mover's shape reaches it (the host alone sending for save cables
+-- left a guest's moved one straight through the wall, bench 2026-11-25).
+local function sendsShape(isCopy) return not isCopy end
+
+local function moved(a, b)
+    if not b or #a ~= #b then return true end
+    for i = 1, #a do
+        if math.abs(a[i].X - b[i].X) + math.abs(a[i].Y - b[i].Y) + math.abs(a[i].Z - b[i].Z) > SHAPE_MOVE then return true end
+    end
+    return false
+end
+
+local function isCopyOf(c)
+    local pc = c:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
+    return pc and pc:IsValid() and copies[tostring(pc.PersistentUniqueId)] or false
+end
+
+local function sendShapes()
+    if #shapeQueue == 0 then
+        if now() - lastShapeRound < SHAPE_EVERY then return end
+        lastShapeRound = now()
+        for _, c in ipairs(allCables()) do shapeQueue[#shapeQueue + 1] = pathOf(c) end
+    end
+    for _ = 1, SHAPE_PER_TICK do
+        local path = table.remove(shapeQueue)
+        if not path then return end
+        local okS, errS = pcall(function()
+            local c = StaticFindObject(path)
+            if not (c and c:IsValid()) or c.bMooringCable then return end
+            local key = keyOf(c)
+            if key:sub(1, 1) ~= "i" or not sendsShape(isCopyOf(c)) then return end
+            local a, b = plugsOf(c)
+            if a == "-" or b == "-" then return end
+            local pts = pointsOf(c)
+            if #pts < 2 then return end
+            local last = shapeSent[key]
+            if last and not moved(pts, last.pts) and now() - last.at < SHAPE_AGAIN then return end
+            if not last then log("kabel %s: form skickad, %d punkter", key, #pts) end
+            shapeSent[key] = { pts = pts, at = now() }
+            local parts = {}
+            for i, p in ipairs(pts) do parts[i] = string.format("%.0f,%.0f,%.0f", p.X, p.Y, p.Z) end
+            net.send("cshape", key, table.concat(parts, ";"))
+        end)
+        if not okS and not shapeErrLogged then
+            shapeErrLogged = true
+            log("kabelform-fel %s: %s", path, tostring(errS))
+        end
+    end
+end
+
+local function splineOf(c)
+    local list = c:K2_GetComponentsByClass(StaticFindObject(SPLINE)) or {}
+    local s = list[1]
+    if s then
+        local okG, g = pcall(function() return s:get() end)
+        if okG and g then s = g end
+        if s:IsValid() then return s end
+    end
+    return c:AddComponentByClass(StaticFindObject(SPLINE), true, IDENTITY, false)
+end
+
+-- Returns true when done (built, or nothing to do), false to try again later. Each copy
+-- is built once: built again whenever the other's cable settled a little, a copy came
+-- unplugged and was removed after its retries (bench 2026-11-25). A copy that does not
+-- stay plugged in after the build is made again without a shape: straight beats gone.
+local SHAPE_CHECK = 1.5
+local shapeSkip = {}         -- key -> until time: copies made again after a failed build
+
+local function applyShape(key, pts)
+    local c = resolve(key)
+    if not c then return false end
+    if not isCopyOf(c) or (shapeSkip[key] or 0) > now() then return true end
+    local a, b = plugsOf(c)
+    if a == "-" or b == "-" then return false end
+    -- A cable into a player's body never stayed plugged in after the build: each one
+    -- was made a second time ("urkopplad efter formen", bench 2026-11-27). It hangs
+    -- off a player anyway, so it keeps the game's own shape.
+    if a:sub(1, 1) == "@" or b:sub(1, 1) == "@" then return true end
+    local path = pathOf(c)
+    if shapeBuilt[key] == path then return true end
+    local spl = splineOf(c)
+    if not (spl and spl:IsValid()) then return true end
+    spl:ClearSplinePoints(false)
+    for _, p in ipairs(pts) do spl:AddSplinePoint(p, 1, false) end
+    spl:UpdateSpline()
+    applyingCable[key] = now() + 3
+    local cls = pathOf(c:GetClass())
+    local maxLen, len = lengthOf(c)
+    c:BuildFromSpline(spl)
+    shapeBuilt[key] = path
+    -- BuildFromSpline unplugged both ends.
+    pcall(applyCable, c, key, a, b)
+    local na, nb = plugsOf(c)
+    if not shapeLogged[key] then
+        shapeLogged[key] = true
+        log("kabel %s: byggd efter den andras form (%d punkter), inkopplad %s", key, #pts, tostring(na == a and nb == b))
+    end
+    ExecuteInGameThreadWithDelay(math.floor(SHAPE_CHECK * 1000), function()
+        pcall(function()
+            local c2 = StaticFindObject(path)
+            if not (c2 and c2:IsValid()) then return end
+            local ca, cb = plugsOf(c2)
+            if ca == a and cb == b then return end
+            local pc = c2:GetComponentByClass(StaticFindObject(PERSIST_CLASS))
+            local id = pc and pc:IsValid() and pc.PersistentUniqueId
+            if id and id ~= 0 then props.suppressGone(tostring(id)) end
+            retries[key] = nil
+            c2:K2_DestroyActor()
+            shapeSkip[key] = now() + 60
+            log("kabel %s: urkopplad efter formen, kopian görs om utan form", key)
+            spawnCopy(key, cls, a, b, tonumber(maxLen), tonumber(len))
+        end)
+    end)
+    return true
+end
+
+local SHAPE_WAIT = 30
+local function applyWantedShapes()
+    for key, w in pairs(shapeWanted) do
+        local ok, done = pcall(applyShape, key, w.pts)
+        if not ok and not shapeErrLogged then shapeErrLogged = true log("kabelform-fel %s: %s", key, tostring(done)) end
+        if not ok or done or now() - w.t > SHAPE_WAIT then shapeWanted[key] = nil end
+    end
+end
+
+function M.wantShape(key, pts)
+    shapeBuilt[key] = nil
+    shapeWanted[key] = { pts = pts, t = now() }
+end
+
+local function handleShape(msg)
+    local key = msg[3]
+    local pts = {}
+    for x, y, z in (msg[4] or ""):gmatch("(%-?[%d%.]+),(%-?[%d%.]+),(%-?[%d%.]+)") do
+        pts[#pts + 1] = { X = tonumber(x), Y = tonumber(y), Z = tonumber(z) }
+    end
+    if #pts < 2 then return end
+    shapeLast[key] = pts
+    shapeWanted[key] = { pts = pts, t = now() }
+end
+
 function M.tick()
     worldSince = worldSince or now()
     if now() - worldSince < 0 then return end
@@ -1484,11 +1708,11 @@ function M.tick()
     if now() - worldSince < 3 then return end
     local due = {}
     for key, l in pairs(limited) do
-        if now() >= l.at then due[#due + 1] = { key = key, msg = l.msg } end
+        if now() >= l.at then due[#due + 1] = { key = key, msg = l.msg, quiet = l.quiet } end
     end
     for _, d in ipairs(due) do
         limited[d.key] = nil
-        log("kabel %s: väntan slut, senaste läget används", d.key)
+        if not d.quiet then log("kabel %s: väntan slut, senaste läget används", d.key) end
         local okL, errL = pcall(handleCable, d.msg)
         if not okL then log("kabel-fel: %s", tostring(errL)) end
     end
@@ -1529,7 +1753,13 @@ function M.tick()
     if not okA then log("kabel-fel: %s", tostring(errA)) end
     local ok, err = part("kabelsvep", pollCables)
     if not ok then log("kabel-fel: %s", tostring(err)) end
-    if isHost then
+    -- Shapes and charges are only for the other player: alone, the host spent
+    -- 15-20 ms a second on them (bench log 2026-11-26).
+    local puppet = puppetOf()
+    local together = puppet and puppet:IsValid()
+    local okF, errF = part("form", function() if together then sendShapes() end applyWantedShapes() end)
+    if not okF then log("kabelform-fel: %s", tostring(errF)) end
+    if isHost and together then
         local okC, errC = part("laddning", sendCharges)
         if not okC then log("el-fel: %s", tostring(errC)) end
     end
@@ -1543,6 +1773,7 @@ function M.handle(msg)
     if msg[1] == "cable" then handleCable(msg) return true end
     if msg[1] == "sockact" then handleSocketAct(msg) return true end
     if msg[1] == "cdir" then handleDir(msg) return true end
+    if msg[1] == "cshape" then pcall(handleShape, msg) return true end
     if msg[1] == "give" then receiveGive(msg) return true end
     if msg[1] == "charge" then
         if not isHost then receiveCharges(msg) end
@@ -1567,7 +1798,8 @@ function M.reset()
     mooringCopies, mooringPlugged, emptiedAt, returned, lastMooringCheck = {}, {}, {}, {}, 0
     follow, givenAway, lastCharge, chargeSent, typesOf, agreed = {}, {}, -100, {}, {}, {}
     goneEarly, consumedOf, looseInfo, retries, dirStates, chargeMiss = {}, {}, {}, {}, {}, {}
-    spawnLog, skippedMooring, blockedEnds, deferred, limited = {}, {}, {}, {}, {}
+    spawnLog, skippedMooring, blockedEnds, deferred, limited, missingSince = {}, {}, {}, {}, {}, {}
+    lastShapeRound, shapeQueue, shapeSent, shapeWanted, shapeLast, shapeLogged, shapeBuilt, shapeSkip = -100, {}, {}, {}, {}, {}, {}, {}
     snapshotWanted, worldSince = false, nil
     pass, chargeSlice = nil, nil
 end

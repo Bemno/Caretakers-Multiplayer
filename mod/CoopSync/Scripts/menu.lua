@@ -37,6 +37,22 @@ local mouseWas = false
 local hoverWas = nil
 local pressedWas = {}    -- address -> SubBtn was pressed last tick
 local lastClickAt = {}   -- address -> os.clock() of its last click, so two click paths don't fire twice
+-- Slate marks a widget hovered only when the mouse moves, so a button drawn under a still cursor
+-- (Play where the world name was) ignored the first click. Our entries are equal height until a
+-- text box, so the same list position is the same place on screen; the cached geometry reads
+-- back as zeros through UE4SS (testbank/motor/menygeometri.lua).
+local placeAddr = {}     -- list position -> our button's address (only above any text box)
+local addrPlace = {}     -- our button's address -> list position
+local stillPlace, stillAt = nil, nil   -- position hovered at the redraw, and the cursor then
+local WLL = "/Script/UMG.Default__WidgetLayoutLibrary"
+
+local function mousePos()
+    local ok, p = pcall(function()
+        local v = StaticFindObject(WLL):GetMousePositionOnPlatform()
+        return { X = v.X, Y = v.Y }
+    end)
+    return ok and p or nil
+end
 
 local function addClick(a, how)
     local t = os.clock()
@@ -399,6 +415,9 @@ end
 -- UMG has no insert, so the game's buttons from Options down are taken out
 -- and put back after ours, which puts ours just above Options.
 local function render(menu, list)
+    stillPlace = hoverWas and addrPlace[hoverWas]
+    stillAt = stillPlace and mousePos()
+    placeAddr, addrPlace = {}, {}
     local root = buttonPanel(menu)
     for _, w in ipairs(children(root)) do
         local a = w:GetAddress()
@@ -423,8 +442,10 @@ local function render(menu, list)
     local cls = StaticFindObject(BTN_CLASS)
     local wbl = StaticFindObject(WBL)
     boxAddr = nil
-    for _, x in ipairs(list) do
+    local boxSeen = false
+    for i, x in ipairs(list) do
         if x.box then
+            boxSeen = true
             local b = wbl:Create(menu, StaticFindObject(BOX_CLASS), localPC())
             if b and b:IsValid() then
                 local max, hint = x.max or 40, x.hint or "name_hint"
@@ -445,7 +466,9 @@ local function render(menu, list)
             applySlot(root:AddChild(btn), look)
             btn:SetText(FText(x.text), 0)
             btn:SetVisibility(VISIBLE)
-            ours[btn:GetAddress()] = x.fn or false
+            local a = btn:GetAddress()
+            ours[a] = x.fn or false
+            if not boxSeen then placeAddr[i], addrPlace[a] = a, i end
         end
         ::continue::
     end
@@ -504,6 +527,14 @@ local function pollMouse(menu)
             pressedWas[a] = pressed
         end
     end
+    if stillPlace then
+        local p = mousePos()
+        if hovered or not (p and stillAt and math.abs(p.X - stillAt.X) < 1 and math.abs(p.Y - stillAt.Y) < 1) then
+            stillPlace = nil
+        else
+            hovered = placeAddr[stillPlace]
+        end
+    end
     if hovered ~= hoverWas then
         log("meny: hover %s, mus %s", tostring(hovered), tostring(down))
         hoverWas = hovered
@@ -531,7 +562,7 @@ function M.handle(msg)
         return true
     end
     if msg[1] ~= "mouse" then return false end
-    if hoverWas then log("meny: mus %s, hover %s", tostring(msg[3]), tostring(hoverWas)) end
+    if hoverWas or (renderedFor and msg[3] == "1") then log("meny: mus %s, hover %s", tostring(msg[3]), tostring(hoverWas)) end
     if msg[3] == "1" and hoverWas and ours[hoverWas] then addClick(hoverWas, "coopnet") end
     return true
 end

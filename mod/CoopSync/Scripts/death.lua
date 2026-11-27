@@ -42,6 +42,18 @@ end
 
 local function vec(v) return { X = v.X, Y = v.Y, Z = v.Z } end
 
+-- In singleplayer death reloads the save, so the game never lets go of what the
+-- player holds; here a cable held at death stayed in the hand after the respawn
+-- (user 2026-11-26). Cables, crates and levers are all held by the grab component.
+local function letGo(p, when)
+    local ok, res = pcall(function()
+        local g = p:GetComponentByClass(StaticFindObject("/Script/Voyage.PhysicsGrabComponent"))
+        if not (g and g:IsValid() and g:IsGrabbing()) then return nil end
+        return g:GrabRelease()
+    end)
+    if ok and res ~= nil then log("död: släppte det som hölls (%s): %s", when, tostring(res)) end
+end
+
 local function capture(p)
     local cap, mesh = p.CapsuleComponent, p.Mesh
     local s = {
@@ -303,11 +315,14 @@ function M.tick()
     if not dead then
         dead, buttons, pending, hudAddr = true, {}, nil, nil
         log("död: spelaren dog")
+        letGo(p, "vid döden")
     end
     if pending then
         local where = pending
         pending = nil
         respawn(where)
+        local q = pawn()
+        if q then letGo(q, "efter återuppståndelsen") end
         return
     end
     local hud = deathHud()

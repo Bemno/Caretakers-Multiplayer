@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.17 — 2026-11-27
+
+Fixes the boat stopping when the recycler runs while the other player drives, and the lag spike every couple of minutes. Still a beta for 2 players; feedback is very welcome.
+
+- Recycler output on a moving boat no longer stops the boat or throws it around
+- Lag spike every ~2 minutes: the mod now saves every 10 minutes, and both players save at the same moment
+- Modules placed straight from the inventory (e.g. the big fuel reserve) are seen by both players
+- A cable moved from one player to the other connects and charges correctly
+- Charging between players is as fast as in singleplayer
+- Fuel backpacks keep their fill level when handed to the other player
+- Items put on a quay above the boat stay on the quay
+- A held cable is dropped when you die
+- Menu buttons work on the first click
+- Enemies on land and big flying creatures go after the player who hits them; wrecks are seen by both
+- Full disk: a clear message instead of a crash, and the session does not start
+- Cables on land look the same for both players
+
 ## 0.2.16 — 2026-11-24
 
 Less stutter for the host and a fix for the boat spinning after the other player builds on it. Still a beta for 2 players; feedback is very welcome.

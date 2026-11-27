@@ -182,7 +182,32 @@ end
 -- Letting the game's cable move power between a player and a battery that
 -- mirrored the other player made power appear, vanish and swing between plus
 -- and minus whatever was counted (2026-11-17, five attempts).
-local BALANCE_RATE = 50     -- battery units per second
+-- The game charged a player from a battery at 70.8 a second on the bench (testbank
+-- laddmat.lua); unlocked upgrades raise it, and 50 here was too slow (user 2026-11-25).
+-- Each player's own rate is learnt from their body socket whenever the game charges
+-- them, and the receiving player's rate is used.
+local DEFAULT_RATE = 70
+local ownRate, peerRate = DEFAULT_RATE, nil
+local bodySocketPath
+local function learnRate()
+    local s = bodySocketPath and StaticFindObject(bodySocketPath)
+    if not (s and s:IsValid()) then
+        s = nil
+        local pawn = localPC().Pawn
+        for _, e in ipairs(pawn:K2_GetComponentsByClass(StaticFindObject("/Script/Voyage.ModuleSocketComponent")) or {}) do
+            local c = e
+            pcall(function() c = e:get() end)
+            if c:GetFName():ToString() == "ElectricSocket" then s = c end
+        end
+        if not s then return end
+        bodySocketPath = s:GetFullName():match("%S+%s+(%S+)")
+    end
+    local r = s.ResourceTransferPerSecond
+    if r and r > ownRate + 0.5 and r < 100000 then
+        ownRate = r
+        log("kroppsuttag: egen laddtakt %.1f per s (från spelet)", r)
+    end
+end
 local function ownLevel(cap)
     local okB, _, have, max = pcall(battery)
     if not (okB and max and max > 0) then return 0 end
@@ -282,7 +307,7 @@ local function spread()
         local p = pending[k]
         if p > 0 then
             -- One step's amount (25) lasts its 0.5 s; a backlog goes faster.
-            local x = math.min(p, math.max(BALANCE_RATE, p * 2) * dt)
+            local x = math.min(p, math.max(ownRate, p * 2) * dt)
             pending[k] = p - x
             if k == "inn" then pm:ForceAddResource(ELECTRICITY, x) else pm:AddResource(ELECTRICITY, -x) end
         end
@@ -320,16 +345,18 @@ local function balance(bat)
     have = have + pending.inn - pending.out
     if not (max and max > 0) then return end
     local amount, hostGives
+    local toPeer, toMe = (peerRate or DEFAULT_RATE) * STEP, ownRate * STEP
     if hostDir == 0 then
         local mine, theirs = have / max, peerLevel / peerMax
         if math.abs(mine - theirs) < 0.01 then return end
         -- Half the gap in units, so both end at the same fraction.
         local gap = math.abs(mine - theirs) / (1 / max + 1 / peerMax) / 2
-        amount, hostGives = math.min(BALANCE_RATE * STEP, gap), mine > theirs
+        hostGives = mine > theirs
+        amount = math.min(hostGives and toPeer or toMe, gap)
     elseif hostDir > 0 then
-        amount, hostGives = math.min(BALANCE_RATE * STEP, have - max * RESERVE, peerMax - peerLevel), true
+        amount, hostGives = math.min(toPeer, have - max * RESERVE, peerMax - peerLevel), true
     else
-        amount, hostGives = math.min(BALANCE_RATE * STEP, peerLevel - peerMax * RESERVE, max - have), false
+        amount, hostGives = math.min(toMe, peerLevel - peerMax * RESERVE, max - have), false
     end
     if amount < 0.5 then return end
     if hostGives then
@@ -455,7 +482,7 @@ end
 function M.socketPath() return body.batPath end
 
 function M.reset()
-    peerLevel, peerMax = nil, nil
+    peerLevel, peerMax, peerRate, bodySocketPath = nil, nil, nil, nil
     pending.inn, pending.out, lastFrame = 0, 0, nil
     body, lastBody = {}, -100
 end
@@ -469,8 +496,9 @@ function M.tick()
     bodyTick(puppet)
     if now() - lastLevel >= 2 then
         lastLevel = now()
+        pcall(learnRate)
         local ok, _, have, max = pcall(battery)
-        if ok then net.send("pwrlvl", string.format("%.1f", have + pending.inn - pending.out), string.format("%.1f", max)) end
+        if ok then net.send("pwrlvl", string.format("%.1f", have + pending.inn - pending.out), string.format("%.1f", max), string.format("%.1f", ownRate)) end
     end
 end
 
@@ -509,7 +537,7 @@ function M.handle(msg)
         pending.inn = pending.inn + amount
         return true
     elseif kind == "pwrlvl" then
-        peerLevel, peerMax = tonumber(msg[3]), tonumber(msg[4])
+        peerLevel, peerMax, peerRate = tonumber(msg[3]), tonumber(msg[4]), tonumber(msg[5])
         return true
     end
     return false

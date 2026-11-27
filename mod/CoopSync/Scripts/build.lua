@@ -416,8 +416,31 @@ local function fastenOnBoat(a)
     return true
 end
 
+-- Modules this game made for the other player's builds, so drops.lua does not take
+-- them for a module the player put down from the inventory.
+local recentRemote = {}     -- { loc, t }
+
+-- A new module here came from a build: a blueprint (or the other's ghost) stood
+-- there, or this game just made it for the other player's build.
+function M.claimedNear(loc)
+    for _, f in pairs(fabs or {}) do
+        if f.loc and dist(f.loc, loc) < NEAR then return true end
+    end
+    for _, path in pairs(ghosts) do
+        local g = StaticFindObject(path)
+        if g and g:IsValid() and dist(g:K2_GetActorLocation(), loc) < NEAR then return true end
+    end
+    for i = #recentRemote, 1, -1 do
+        local r = recentRemote[i]
+        if now() - r.t > 10 then table.remove(recentRemote, i)
+        elseif dist(r.loc, loc) < NEAR then return true end
+    end
+    return false
+end
+
 local function buildRemote(key, classPath, loc, rot, peerModuleId, itemPath, m)
     removeRemote(key, "byggd hos den andra")
+    recentRemote[#recentRemote + 1] = { loc = loc, t = now() }
     if M.notModule(classPath) then log("bygge: %s är ingen modul, skapas inte", classPath) return end
     if itemPath and itemPath ~= "" then M.learn(itemPath, classPath) end
     -- A summoned module registers before it has a save id, gets address 0 and
@@ -601,6 +624,7 @@ local function poll()
     end
     for path, f in pairs(fabs) do
         if not seen[path] then
+            if f.loc then recentRemote[#recentRemote + 1] = { loc = f.loc, t = now() } end
             fabs[path] = nil
             local ok, err = pcall(vanished, path, f)
             if not ok then log("bygge-fel: %s", tostring(err)) end

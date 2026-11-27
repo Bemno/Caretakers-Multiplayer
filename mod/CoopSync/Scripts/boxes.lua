@@ -77,6 +77,49 @@ local function diff(from, to)
     return d, any
 end
 
+-- A slot's ItemDataMap holds what ItemData does not: a petrol backpack's fuel is the module
+-- state under "Comp0" (bench 2026-11-25). Encoded "key=hex+key=hex". Written by adding an
+-- empty entry (FString key) and filling its Data byte by byte; a Lua byte list handed to
+-- the game in one go crashed it (SetSlotData, 2026-11-22).
+local function mapEncode(data)
+    local parts = {}
+    data.ItemDataMap:ForEach(function(k, v)
+        local hex = {}
+        v:get().Data:ForEach(function(_, b) hex[#hex + 1] = string.format("%02x", b:get()) end)
+        parts[#parts + 1] = k:get():ToString() .. "=" .. table.concat(hex)
+    end)
+    table.sort(parts)
+    return table.concat(parts, "+")
+end
+
+local function mapWrite(data, enc)
+    local n = 0
+    for key, hex in (enc or ""):gmatch("([%w_]+)=(%x*)") do
+        local arr
+        data.ItemDataMap:ForEach(function(k, v) if k:get():ToString() == key then arr = v:get().Data end end)
+        if not arr then
+            data.ItemDataMap:Add(FString(key), { Data = {} })
+            data.ItemDataMap:ForEach(function(k, v) if k:get():ToString() == key then arr = v:get().Data end end)
+        end
+        if arr then
+            arr:Empty()
+            local i = 0
+            for h in hex:gmatch("%x%x") do
+                i = i + 1
+                arr[i] = tonumber(h, 16)
+            end
+            n = n + 1
+        end
+    end
+    return n
+end
+
+local function mapCount(data)
+    local n = 0
+    data.ItemDataMap:ForEach(function() n = n + 1 end)
+    return n
+end
+
 local function isContainer(owner)
     return owner:GetClass():GetFName():ToString():sub(1, 13) == "BP_Inventory_"
 end
@@ -239,6 +282,7 @@ function M.modulesNamed(match)
 end
 
 M.counts, M.diff, M.apply, M.encode, M.decode, M.loadItem, M.idOfActor = counts, diff, apply, encode, decode, loadItem, idOfActor
+M.mapEncode, M.mapWrite, M.mapCount = mapEncode, mapWrite, mapCount
 
 function M.init(netModule, logFn, localPCFn, nowFn, propsModule, host)
     net, log, localPC, now, props, isHost = netModule, logFn, localPCFn, nowFn, propsModule, host

@@ -8,7 +8,7 @@
 --
 -- Hits: the guest's hits on its copy are sent (npchit) and the host deals
 -- them to its NPC; the host sends each NPC's health, and one dead at the
--- host is hidden at the guest (the loot drops once, at the host, and
+-- host stays as a wreck at the guest where the host's fell (the loot drops once, at the host, and
 -- drops.lua sends it).
 --
 -- The one who fights owns (arkiv.md pattern 4) is built but off (HANDOVER):
@@ -114,7 +114,7 @@ local function sendOne(key, a)
         healthSeen[key] = hs
     end
     net.send("npc", key, pathOf(a:GetClass()), f1(l.X), f1(l.Y), f1(l.Z), f1(r.Yaw), f1(RotP(r)),
-        string.format("%.3f", now()), hs.h and f1(hs.h) or "")
+        string.format("%.3f", now()), hs.h and f1(hs.h) or "", f1(r.Roll))
 end
 
 -- Host ---------------------------------------------------------------------
@@ -148,6 +148,7 @@ end
 -- The host's own shark took about 20 health per 5 s from the host; 75 every
 -- 1.5 s killed the guest in two bites. To be tuned in play.
 local HUNT_RADIUS, WATER_Z, BITE_COOLDOWN, BITE_SLACK, HUNT_EVERY = 3000, 0, 4, 600, 0.5
+local LAND_RADIUS = 20000
 local lastBite, lastHunt = {}, -100
 -- A shark only goes for someone who hit it; left alone it swims off. Hunting
 -- for the guest whenever the guest swam near made the shark chase both
@@ -167,37 +168,70 @@ local function inWater(actor)
     return l
 end
 
+-- On land too: the rolling enemy (always hostile) and the big flying creatures never
+-- went for 2an, since the host's AI perceives only the host (user 2026-11-24/25). A
+-- creature already after the host turns to the guest when the guest is nearer, as it
+-- would to the nearest player; one the guest hit goes for the guest as the shark does.
+local fromHost = {}          -- key -> true: was after the host when turned to the puppet
+local function targetOf(c)
+    local okT, t = pcall(function() return c.CurrentTarget end)
+    if okT and t and t:IsValid() then return t end
+end
+
 local function hunt()
     if now() - lastHunt < HUNT_EVERY then return end
     lastHunt = now()
     local doll = M.peer and M.peer()
     if not (doll and doll:IsValid()) then return end
-    local dl = inWater(doll)
-    if not dl then return end
+    local dollAt = doll:K2_GetActorLocation()
+    local dollWet = inWater(doll)
     local me = localPC().Pawn
+    local meAt = me and me:IsValid() and me:K2_GetActorLocation()
     local ml = me and me:IsValid() and inWater(me)
     for key, a in pairs(npcs) do
-        if owner[key] == "guest" or now() - (provokedAt[key] or -1e9) > PROVOKED_SECONDS then
-            if lastBite[key] then
-                lastBite[key] = nil
-                log("npc: %s lämnar gästen", key)
-            end
-            goto continue
-        end
+        if owner[key] == "guest" then goto continue end
         pcall(function()
-            if not (a:IsValid() and a.EnableMeleeAbility) then return end
+            if not a:IsValid() then return end
             local al = a:K2_GetActorLocation()
-            local d = dist(al, dl)
-            if d > HUNT_RADIUS then return end
-            -- The host in the water and nearer: the shark's own choice stands.
-            if ml and dist(al, ml) < d then return end
             local c = a.Controller
+            local aquatic = al.Z <= WATER_Z
+            -- The flying creatures keep 80-130 m up and 140 m off (bench 2026-11-27);
+            -- neither they nor the rolling enemy have a melee ability.
+            local melee = a.EnableMeleeAbility
+            local provoked = now() - (provokedAt[key] or -1e9) <= PROVOKED_SECONDS
+            local dl = aquatic and dollWet or (not aquatic and dollAt)
+            local d = dl and dist(al, dl)
+            local onHost = c and c:IsValid() and meAt and targetOf(c)
+            onHost = onHost and onHost:GetAddress() == me:GetAddress()
+            local wanted = d and d <= (aquatic and HUNT_RADIUS or LAND_RADIUS)
+            if wanted and aquatic then
+                -- The host in the water and nearer: the shark's own choice stands.
+                wanted = provoked and not (ml and dist(al, ml) < d)
+            elseif wanted then
+                local nearer = not meAt or dist(al, meAt) > d
+                local onDoll = c and c:IsValid() and targetOf(c)
+                onDoll = onDoll and onDoll:GetAddress() == doll:GetAddress()
+                wanted = (provoked or onHost or onDoll) and (nearer or provoked)
+            end
+            if not wanted then
+                if lastBite[key] then
+                    lastBite[key] = nil
+                    -- Back to the host when it was turned to the puppet: the host's AI
+                    -- may not pick its target again by itself.
+                    local t = c and c:IsValid() and targetOf(c)
+                    if fromHost[key] and t and t:GetAddress() == doll:GetAddress() and meAt then c:SetCurrentTarget(me) end
+                    fromHost[key] = nil
+                    log("npc: %s lämnar gästen", key)
+                end
+                return
+            end
+            if not lastBite[key] and onHost then fromHost[key] = true end
             if c and c:IsValid() then c:SetCurrentTarget(doll) end
             if not lastBite[key] then
                 lastBite[key] = -100
-                log("npc: %s jagar gästen (%.1f m)", key, d / 100)
+                log("npc: %s jagar gästen (%.1f m, %s)", key, d / 100, aquatic and "vatten" or "land")
             end
-            if d <= a:GetMeleeAttackRange() + BITE_SLACK and now() - (lastBite[key] or -100) >= BITE_COOLDOWN then
+            if melee and d <= a:GetMeleeAttackRange() + BITE_SLACK and now() - (lastBite[key] or -100) >= BITE_COOLDOWN then
                 lastBite[key] = now()
                 local dmg = a.MeleeAttack.Damage
                 net.send("npcbite", key, f1(dmg), f1(al.X), f1(al.Y), f1(al.Z))
@@ -236,6 +270,21 @@ local function tame(a, key)
         end
     end)
     pcall(function() a.CharacterMovement:SetComponentTickEnabled(false) parts[#parts + 1] = "rörelse av" end)
+    -- The rolling enemy (BP_NPC_RollerBoi_ProcWalk_C) moves by physics, not a movement
+    -- component: its copy kept simulating against the mod's placing and flickered at
+    -- the guest (user 2026-11-24).
+    pcall(function()
+        local n = 0
+        for _, e in ipairs(a:K2_GetComponentsByClass(StaticFindObject("/Script/Engine.PrimitiveComponent")) or {}) do
+            local c = e
+            pcall(function() c = e:get() end)
+            if c:IsSimulatingPhysics(FName("None")) then
+                c:SetSimulatePhysics(false)
+                n = n + 1
+            end
+        end
+        if n > 0 then parts[#parts + 1] = string.format("fysik av på %d delar", n) end
+    end)
     -- Moved with K2_TeleportTo (boat.moveActor), which refused the copy near
     -- the sea floor (encroaching world geometry) 10-25 % of the time; the copy
     -- needs no collision with the world (channels 0 WorldStatic, 1 WorldDynamic).
@@ -324,7 +373,6 @@ local function mirror()
         local a = localFor(key)
         if a then
             if iOwn(key) then untame(a, key) else tame(a, key) end
-            if deadKeys[key] then pcall(hide, a, key) end
             wanted[a:GetAddress()] = true
         elseif r and not pending then
             local className = r.class:match("%.([^%.]+)$") or r.class
@@ -436,14 +484,17 @@ local function takeHit(key, dmg)
     log("npc: gästen träffade %s (%.0f): %s, liv nu %s", key, dmg, ok and "ok" or tostring(err), okH and tostring(h) or "?")
 end
 
--- Follower: health only goes down, by the game's own damage; dead hides.
+-- Follower: health only goes down, by the game's own damage.
 local function followHealth(key, a, h)
     if not h then return end
     if h <= 0 then
+        -- Not hidden: the host's dead creature stays where it fell (a shot-down
+        -- flyer crashed to the deck and lay there) and its place is still sent; hidden
+        -- here, the wreck was never seen by 2an (user 2026-11-25, bench 2026-11-27).
+        -- It goes when the host's list drops it.
         if not deadKeys[key] then
             deadKeys[key] = true
-            pcall(hide, a, key)
-            log("npc: %s dog hos ägaren, dold här", key)
+            log("npc: %s dog hos ägaren, ligger kvar som vrak", key)
         end
         return
     end
@@ -495,13 +546,14 @@ function M.frame()
                         local t = (renderT - x.st) / math.max(y.st - x.st, 0.001)
                         s = { x = lerp(x.x, y.x, t), y = lerp(x.y, y.y, t), z = lerp(x.z, y.z, t),
                             yaw = x.yaw + wrap(y.yaw - x.yaw) * t, pitch = lerp(x.pitch, y.pitch, t),
+                            roll = x.roll + wrap(y.roll - x.roll) * t,
                             vx = (y.x - x.x) / math.max(y.st - x.st, 0.001), vy = (y.y - x.y) / math.max(y.st - x.st, 0.001),
                             vz = (y.z - x.z) / math.max(y.st - x.st, 0.001) }
                         break
                     end
                 end
                 s = s or buf[#buf]
-                require("boat").moveActor(a, { X = s.x, Y = s.y, Z = s.z }, Rot(s.pitch or 0, s.yaw, 0))
+                require("boat").moveActor(a, { X = s.x, Y = s.y, Z = s.z }, Rot(s.pitch or 0, s.yaw, s.roll or 0))
                 -- The animation reads the movement component's velocity.
                 pcall(function() a.CharacterMovement.Velocity = { X = s.vx or 0, Y = s.vy or 0, Z = s.vz or 0 } end)
             end)
@@ -580,7 +632,7 @@ function M.handle(msg)
         remote[key] = r
         r.class, r.t = msg[4], now()
         r.buf[#r.buf + 1] = { st = st, off = off, x = tonumber(msg[5]), y = tonumber(msg[6]), z = tonumber(msg[7]),
-            yaw = tonumber(msg[8]) or 0, pitch = tonumber(msg[9]) or 0 }
+            yaw = tonumber(msg[8]) or 0, pitch = tonumber(msg[9]) or 0, roll = tonumber(msg[12]) or 0 }
         while #r.buf > 20 do table.remove(r.buf, 1) end
         local h = tonumber(msg[11])
         if h then

@@ -6,7 +6,13 @@ local M = {}
 local T = require("text")
 
 M.VERSION = "0.4"
-local SAVE_EVERY = 240          -- the game autosaves after 5 min without a save
+-- The game autosaves after 5 min without a save (AutoSaveInterval, into the
+-- singleplayer slot). Saving every 4 min to stay ahead stalled the game too often
+-- (user 2026-11-27): every 10 min now, with the game's interval set to 15 in memory
+-- during the session (never written to the ini) and the guard putting singleplayer
+-- files back if the game autosaves anyway.
+local SAVE_EVERY = 600
+local SESSION_AUTOSAVE = 15
 local HELLO_EVERY = 3
 local MAP = "VoyageWorld2"
 local CLIENT = "_klient"
@@ -16,6 +22,7 @@ local UEHelpers = require("UEHelpers")
 
 local role, world
 local inWorldSince, lastSave = nil, 0
+local hostSaved = false          -- guest: the host saved (hsaved), save too
 local guestWaiting, sendState = false, nil   -- host: nil | "saving" | "sending"
 local saveRequestedAt = 0
 local joining, lastHello, joinPeer = false, 0, nil
@@ -70,7 +77,7 @@ M.status, M.me, M.code, M.modWarning = "", nil, nil, nil
 -- One-off messages ("Deleted x", "Invite copied") fade after a few seconds;
 -- progress messages stay until something replaces them.
 local STATUS_SECONDS = 6
-local STICKY = { joining = true, reconnecting = true, waiting = true, receiving = true, loading = true, loading_host = true, creating = true }
+local STICKY = { disk_full = true, joining = true, reconnecting = true, waiting = true, receiving = true, loading = true, loading_host = true, creating = true }
 local statusAt, statusSticky = 0, false
 
 local function status(key, ...)
@@ -449,8 +456,31 @@ end
 -- Back on the title screen after a multiplayer world: the session is over.
 -- The guard puts singleplayer files back one last time and stops, so
 -- singleplayer can be played and saved in the same run.
+local autosaveWas            -- the player's own interval, put back when the session ends
+local function userSettings()
+    for _, o in ipairs(FindAllOf("VoyageGameUserSettings") or {}) do
+        if o:IsValid() and not o:GetFullName():find("Default__", 1, true) then return o end
+    end
+end
+local function holdAutosave(on)
+    pcall(function()
+        local gus = userSettings()
+        if not gus then return end
+        if on and not autosaveWas then
+            autosaveWas = gus.CustomSettings.AutoSaveInterval
+            gus.CustomSettings.AutoSaveInterval = SESSION_AUTOSAVE
+            log("spelets autosparning: %s -> %d min under sessionen", tostring(autosaveWas), SESSION_AUTOSAVE)
+        elseif not on and autosaveWas then
+            gus.CustomSettings.AutoSaveInterval = autosaveWas
+            log("spelets autosparning tillbaka till %s min", tostring(autosaveWas))
+            autosaveWas = nil
+        end
+    end)
+end
+
 local function leave()
     log("multiplayer slut: vakten av, roll %s nollställd", tostring(role))
+    holdAutosave(false)
     if role == "host" then net.send("hostbye") end
     net.send("save", "guard", "off")
     net.send("steam", "leave")
@@ -570,6 +600,7 @@ function M.tick()
     local sub = subsystem()
     if not sub then return end
     local slot = "Coop/" .. world
+    holdAutosave(true)
 
     if role == "host" and guestWaiting and not sendState then
         guestWaiting = false
@@ -584,17 +615,30 @@ function M.tick()
     -- The guest's copy is never used (each join brings the host's world), but saving it
     -- holds the game's autosave off the singleplayer slots: without it the guest's game
     -- autosaved into them 5 min after loading (bench 2026-11-19, the guard put them back).
+    -- Each save stalls its game 100-500 ms; host and guest saving on their
+    -- own clocks gave a stall about every other minute (bench 2026-11-27, the saves at
+    -- the measured stalls). The guest saves when the host has (hsaved), so both stall
+    -- at once, and on its own only if the host's word does not come.
     if role == "guest" and not M.guestSaves then return end
-    if os.time() - lastSave >= SAVE_EVERY and os.time() - inWorldSince > 60 then
-        lastSave = os.time()
+    local since = os.time() - lastSave
+    local due = since >= SAVE_EVERY
+    if role == "guest" then
+        due = (hostSaved and since >= 60) or since >= SAVE_EVERY + 30
+    end
+    if due and os.time() - inWorldSince > 60 then
+        lastSave, hostSaved = os.time(), false
         local ok, res = pcall(function() return sub:RequestSaveGame(slot) end)
         log("sparar %s: %s", slot, ok and tostring(res) or tostring(res))
+        if role == "host" then net.send("hsaved") end
     end
 end
 
 function M.handle(msg)
     local kind = msg[1]
-    if kind == "hello" then
+    if kind == "hsaved" then
+        hostSaved = true
+        return true
+    elseif kind == "hello" then
         if role == "host" then
             compareMods(msg[4], msg[3])
             M.peerName = msg[5] ~= "" and msg[5] or nil
@@ -666,6 +710,13 @@ function M.handle(msg)
             M.refresh()
         elseif what == "error" then status("error", tostring(msg[4])) log("spar-fel: %s", tostring(msg[4]))
         elseif what == "guarded" then log("vakten återställde %s singleplayer-filer", tostring(msg[4]))
+        elseif what == "guardfail" then
+            -- Without the guard the game's autosave could write over singleplayer
+            -- saves, so the session does not start (full disk, user report 2026-11-26).
+            log("vakten kunde inte slås på: %s", tostring(msg[5]))
+            pendingLoad, pendingNew = nil, nil
+            if role then leave() end
+            status(msg[4] == "disk" and "disk_full" or "error", tostring(msg[5]))
         elseif what == "guard" then
             guardReady = msg[4] == "on"
             log("vakten %s, världarna %s", msg[4], guardReady and "inne i SaveGames" or "flyttade ut")

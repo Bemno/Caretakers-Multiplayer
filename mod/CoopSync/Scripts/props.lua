@@ -368,6 +368,45 @@ local function boatAt(l)
     end
 end
 
+-- boatAt with what is under the place: the bounds reach 200 cm over the boat, and a
+-- battery set on a quay hanging over the deck was welded to the hull and swung with it
+-- (user 2026-11-24). Something fixed under it that is not the boat (or fastened to it)
+-- means the world; nothing under it keeps boatAt's answer. One trace with an out
+-- parameter, so only for single decisions (a drop, the end of a watch), not per tick.
+local UNDER_DEPTH = 300
+local function partOfBoat(c, b)
+    local ba = b:GetAddress()
+    local owner = c:GetOwner()
+    if owner:GetAddress() == ba then return true end
+    if c:GetFullName():find(b:GetFName():ToString() .. "LevelInstance", 1, true) then return true end
+    local p = owner:GetAttachParentActor()
+    if p and p:IsValid() and p:GetAddress() == ba then return true end
+    -- A loose crate resting on deck in the game that runs the boat's physics.
+    return c:IsSimulatingPhysics(FName("None"))
+end
+
+local function deckBoat(l, ignore)
+    local b = boatAt(l)
+    if not b then return nil end
+    local o = {}
+    local col = { R = 0, G = 0, B = 0, A = 0 }
+    local ok, hit = pcall(function()
+        return StaticFindObject("/Script/Engine.Default__KismetSystemLibrary"):LineTraceSingle(ignore or b, l,
+            { X = l.X, Y = l.Y, Z = l.Z - UNDER_DEPTH }, 0, false, ignore and { ignore } or {}, 0, o, ignore ~= nil, col, col, 0)
+    end)
+    if not (ok and hit == true) then return b end
+    local okC, own, what = pcall(function()
+        local c = (o.OutHit or o).Component:get()
+        return partOfBoat(c, b), c:GetFullName()
+    end)
+    if okC and own == false then
+        log("över båten men står på %s, räknas som världen", tostring(what))
+        return nil
+    end
+    return b
+end
+M.deckBoat = deckBoat
+
 -- Physics on a boat runs in the game that moves the boat (whoever drives or
 -- moored last, boat.lua); the other game places its boat every frame and
 -- crates there bounce metres. Off a boat the host keeps it, as before.
@@ -545,11 +584,25 @@ end
 -- b: the boat when the caller knows it (a built module hangs on it, at the bow
 -- or on a wall outside boatAt's deck box).
 function M.weldOnBoat(comp, l, b)
-    b = b or boatAt(l)
+    b = b or deckBoat(l, comp:GetOwner())
     local hull = b and hullOf(b)
-    if not hull then return end
+    if not hull then
+        -- Frozen over the deck but resting on the quay: it lies there like any drop.
+        pcall(function() comp:SetSimulatePhysics(true) end)
+        return
+    end
     local attached, welded = weldInto(comp, hull)
     log("fryst släpp svetsat direkt på båten (fäst %s, svetsad %s)", tostring(attached), tostring(welded))
+end
+
+-- Machine output under way: welded at the outlet it shoved the hull sideways
+-- 6 m/s and stopped the boat (bench 2026-11-27), as on the guest 2026-11-18.
+function M.fastenOnBoat(comp, b)
+    local hull = b and b:IsValid() and hullOf(b)
+    if not hull then return false end
+    fastenWithoutWeld(comp, hull)
+    log("maskinutmatning fäst utan svetsning på båten i fart: %s", physState(comp))
+    return true
 end
 
 -- Follows the boat without becoming part of the hull's body and without
@@ -631,7 +684,7 @@ local function watchTick(id, w)
         return
     end
     log("låda %s slutar bevakas efter %s: %s", id, w.still >= REST_TICKS and "stilla" or "tiden", where(comp))
-    local hull = b and hullOf(b)
+    local hull = b and deckBoat(l, comp:GetOwner()) and hullOf(b)
     -- Attached with welding, like the game's own welded crates. WeldPrimitive
     -- welded its second argument into the first: the boat into the crate.
     if hull and weldInto(comp, hull) then
@@ -709,6 +762,10 @@ function M.settle(id)
     pcall(function() rem.buf, rem.from = nil, nil place(rem, now()) end)
     pcall(function() rem.comp:GetOwner():SetActorEnableCollision(true) end)
     local b = rem.boatKey and require("boat").find(rem.boatKey)
+    if b then
+        local okD, d = pcall(deckBoat, rem.comp:K2_GetComponentLocation(), rem.comp:GetOwner())
+        if okD and not d then b = nil end
+    end
     local hull = b and hullOf(b)
     -- At a machine's outlet a piece welded into the hull pushed against the
     -- machine: the guest's boat bounced, threw the guest off and tore the
@@ -1065,6 +1122,7 @@ local function handleGone(id)
     end)
     if okH and heldNow then
         log("borta-meddelande för %s ignoreras, jag håller den", id)
+        if M.heldGoneHook then pcall(M.heldGoneHook, owner) end
         return
     end
     if M.goneHook and M.goneHook(owner, id) then return end

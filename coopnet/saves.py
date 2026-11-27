@@ -158,14 +158,20 @@ class Saves:
         if not os.path.exists(os.path.join(self.vault, "manifest.json")):
             os.makedirs(self.vault, exist_ok=True)
             manifest = {}
-            for i, path in enumerate(self._watched()):
-                copy = os.path.join(self.vault, f"{i}.sav")
-                shutil.copy2(path, copy)
-                st = os.stat(path)
-                manifest[path] = {"copy": copy, "size": st.st_size, "mtime": st.st_mtime}
-            manifest["_dirs"] = self._watched_dirs()
-            with open(os.path.join(self.vault, "manifest.json"), "w", encoding="utf-8") as f:
-                json.dump(manifest, f)
+            try:
+                for i, path in enumerate(self._watched()):
+                    copy = os.path.join(self.vault, f"{i}.sav")
+                    shutil.copy2(path, copy)
+                    st = os.stat(path)
+                    manifest[path] = {"copy": copy, "size": st.st_size, "mtime": st.st_mtime}
+                manifest["_dirs"] = self._watched_dirs()
+                with open(os.path.join(self.vault, "manifest.json"), "w", encoding="utf-8") as f:
+                    json.dump(manifest, f)
+            except OSError:
+                # A half vault without its manifest would only fill the disk further
+                # (full disk, WinError 112, user report 2026-11-26).
+                shutil.rmtree(self.vault, ignore_errors=True)
+                raise
         else:
             self.guard_check()
         # The client copy is not moved in: the guest has just received a new one.

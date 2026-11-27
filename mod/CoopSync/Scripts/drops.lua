@@ -94,6 +94,7 @@ end
 
 -- Built modules sit in a socket or stand still; a dropped one falls free (or was
 -- frozen here on a boat this game only follows).
+local PLACED_RADIUS = 600
 local function looseModule(actor, frozen)
     local root = actor.RootComponent
     local pa = root:GetAttachParent()
@@ -139,7 +140,7 @@ local function onBeginPlay(ctx)
             -- A machine's output appears wherever the player is; on the
             -- following boat it bounced around (2026-11-16).
             if not near and M.machines then near = M.machines.nearMachine(l, MACHINE_RADIUS) ~= nil end
-            if near and props.onBoat(l) and not props.ownsPhysicsAt(l) then
+            if near and props.deckBoat(l, actor) and not props.ownsPhysicsAt(l) then
                 actor.RootComponent:SetSimulatePhysics(false)
                 local r = actor:K2_GetActorRotation()
                 local okF, floor = pcall(onFloor, actor, l)
@@ -215,11 +216,22 @@ local function stateOf(actor)
     return table.concat(hex), tostring(d.Flags)
 end
 
-local function applyState(actor, hex, flags)
+-- The slot's ItemDataMap (a petrol backpack's fuel), boxes.mapEncode.
+local function mapOf(actor)
+    local out
+    inventoryOf(actor).Items:ForEach(function(_, v)
+        if out then return end
+        out = require("boxes").mapEncode(v:get().Data)
+    end)
+    return out or ""
+end
+
+local function applyState(actor, hex, flags, map)
     local n = 0
     inventoryOf(actor).Items:ForEach(function(_, v)
         if n > 0 then return end
         local data = v:get().Data
+        if map and map ~= "" then pcall(require("boxes").mapWrite, data, map) end
         local arr = data.ItemData
         local i = 0
         for h in hex:gmatch("%x%x") do
@@ -273,12 +285,27 @@ local function putDownOrphans()
     end
 end
 
+-- Machine output queued to fall stood frozen and unattached in the world while the
+-- boat drove on: the hull hit it, pitched 20 degrees and stuck until the output was
+-- picked up (user 2026-11-27, Zanek31 2026-11-24). Under way it is fastened instead.
+local MOVING_SPEED = 50
+local function boatMoving(b)
+    if not (b and b:IsValid()) then return false end
+    local v = b:GetVelocity()
+    return v.X * v.X + v.Y * v.Y > MOVING_SPEED * MOVING_SPEED
+end
+
 -- Returns true when the actor is the copy of a peer drop.
 local function claimForPeer(actor, item, loc)
     for i, p in ipairs(pendingPeer) do
         if (not item or p.item == pathOf(item)) and dist(loc, p.loc) < MATCH_RADIUS then
             table.remove(pendingPeer, i)
             local id, pc = saveId(actor)
+            -- The boat sailed on between spawn and claim: placed where it was, the
+            -- copy stood frozen in the world ahead of the hull (user 2026-11-27).
+            if p.boat and p.boat:IsValid() then
+                p.loc = StaticFindObject("/Script/Engine.Default__KismetMathLibrary"):TransformLocation(p.boat:GetTransform(), p.rel)
+            end
             actor:K2_SetActorLocationAndRotation(p.loc, p.rot, false, {}, true)
             if id then props.alias(p.peerId, id, pc) end
             props.claimedPaths[pathOf(actor)] = true
@@ -289,6 +316,8 @@ local function claimForPeer(actor, item, loc)
             local root = actor.RootComponent
             if p.world then
                 pcall(function() root:SetSimulatePhysics(true) end)
+            elseif p.machineOut and boatMoving(p.boat) and props.fastenOnBoat(root, p.boat) then
+                -- fastened above
             elseif p.machineOut and props.onBoat(p.loc) and props.ownsPhysicsAt(p.loc) then
                 -- Falls here like this game's own machine output; streamed until it rests.
                 -- One at a time: arriving in a burst, five copies at the outlet at once
@@ -309,8 +338,8 @@ local function claimForPeer(actor, item, loc)
                 pcall(function() root:SetSimulatePhysics(false) end)
                 waiting[#waiting + 1] = { path = pathOf(actor), untilT = now() + WAIT_FOR_REST }
             end
-            if p.state ~= "" then
-                local okA, n = pcall(applyState, actor, p.state, p.flags)
+            if p.state ~= "" or p.map ~= "" then
+                local okA, n = pcall(applyState, actor, p.state, p.flags, p.map)
                 log("släpp från andra: tillstånd %s", okA and (n .. " byte") or tostring(n))
             end
             local have = item and countOf(actor, item) or p.count
@@ -384,7 +413,15 @@ local function examine(entry)
     if claimForPeer(actor, item, loc) then return end
     if entry.module then
         local okL, loose = pcall(looseModule, actor, entry.frozen ~= nil)
-        if not (okL and loose) then return end
+        -- A module put down from the inventory (the big petrol reserve) stands
+        -- still like a built one and was seen only by the one who placed it (user
+        -- 2026-11-25). Built ones are build.lua's: a blueprint or ghost stood there.
+        if not (okL and loose) then
+            if actor.bHidden or not M.build or M.build.claimedNear(loc) then return end
+            local pawn = localPC().Pawn
+            if not (pawn and pawn:IsValid()) or dist(loc, pawn:K2_GetActorLocation()) > PLACED_RADIUS then return end
+            entry.placed = true
+        end
     end
     for _, p in ipairs(pendingPeer) do
         if dist(loc, p.loc) < MATCH_RADIUS then
@@ -412,7 +449,7 @@ local function examine(entry)
     -- follower shows it 0.12 s late), and spawned at the world spot the piece came
     -- inside the hull and the push threw the boat over (2026-11-19, also 0.2.6).
     local bkey, rel = "", nil
-    local b = props.boatAt(loc)
+    local b = props.deckBoat(loc, actor)
     if b then
         bkey = require("boat").keyOf(b)
         rel = StaticFindObject("/Script/Engine.Default__KismetMathLibrary"):InverseTransformLocation(b:GetTransform(), loc)
@@ -427,8 +464,10 @@ local function examine(entry)
     id = props.wire(id)
     local okS, hex, flags = pcall(stateOf, actor)
     if not okS then log("släpp: kunde inte läsa föremålets tillstånd: %s", tostring(hex)) hex, flags = "", "" end
+    local okM, map = pcall(mapOf, actor)
+    map = okM and map or ""
     net.send("drop", id, pathOf(item), f1(loc.X), f1(loc.Y), f1(loc.Z), f1(RotP(r)), f1(r.Yaw), f1(r.Roll), countOf(actor, item),
-        kind, bkey, rel and f1(rel.X) or "", rel and f1(rel.Y) or "", rel and f1(rel.Z) or "", hex, flags)
+        kind, bkey, rel and f1(rel.X) or "", rel and f1(rel.Y) or "", rel and f1(rel.Z) or "", hex, flags, map)
     -- A frozen drop is not streamed: the host's copy lands and the guest's follows.
     -- On a boat this game moves, it is watched like a let-go crate: streamed
     -- until it rests, then welded there in both games.
@@ -439,7 +478,7 @@ local function examine(entry)
         -- game only follows (its physics off): the piece hung in the air as the boat
         -- moved on (2026-11-19). Fastened to the hull by the mod instead.
         if b and not props.ownsPhysicsAt(loc) then props.weldOnBoat(actor.RootComponent, loc) end
-    elseif props.onBoat(loc) and props.ownsPhysicsAt(loc) and not machine then
+    elseif b and props.ownsPhysicsAt(loc) and not machine then
         props.watch(id, actor.RootComponent)
     else
         following[#following + 1] = { comp = actor.RootComponent, id = id, untilT = now() + FOLLOW_SECONDS, still = 0 }
@@ -586,14 +625,17 @@ local function spawnForPeer(msg)
     local peerId, path = msg[3], msg[4]
     local loc = { X = tonumber(msg[5]), Y = tonumber(msg[6]), Z = tonumber(msg[7]) }
     local b = msg[13] and msg[13] ~= "" and require("boat").find(msg[13])
+    local rel
     if b and tonumber(msg[16]) then
-        local rel = { X = tonumber(msg[14]), Y = tonumber(msg[15]), Z = tonumber(msg[16]) + ((msg[12] == "f" or msg[12] == "m") and 0 or DROP_LIFT) }
+        rel = { X = tonumber(msg[14]), Y = tonumber(msg[15]), Z = tonumber(msg[16]) + ((msg[12] == "f" or msg[12] == "m") and 0 or DROP_LIFT) }
         loc = StaticFindObject("/Script/Engine.Default__KismetMathLibrary"):TransformLocation(b:GetTransform(), rel)
+    else
+        b = nil
     end
     local rot = Rot(tonumber(msg[8]), tonumber(msg[9]), tonumber(msg[10]))
     local item = findItem(path)
     if not item then log("släpp från andra: hittar inte föremålet %s", path) return end
-    pendingPeer[#pendingPeer + 1] = { peerId = peerId, item = path, loc = loc, rot = rot, t = now(), count = tonumber(msg[11]) or 1, world = msg[12] == "w", frozen = msg[12] == "f" or msg[12] == "m", machineOut = msg[12] == "m", state = msg[17] or "", flags = msg[18] or "" }
+    pendingPeer[#pendingPeer + 1] = { peerId = peerId, item = path, loc = loc, rel = rel, boat = b, rot = rot, t = now(), count = tonumber(msg[11]) or 1, world = msg[12] == "w", frozen = msg[12] == "f" or msg[12] == "m", machineOut = msg[12] == "m", state = msg[17] or "", flags = msg[18] or "", map = msg[19] or "" }
     local transform = {
         Translation = loc,
         Rotation = { X = 0, Y = 0, Z = 0, W = 1 },

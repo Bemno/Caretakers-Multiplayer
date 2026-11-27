@@ -5,6 +5,7 @@ the peer as they are; `sendfile|<path>|<name>` sends a whole file, which the
 other side writes into the save folder and announces with `savefile|<path>`.
 """
 import argparse
+import errno
 import os
 import socket
 import sys
@@ -20,6 +21,11 @@ DEFAULT_SAVEDIR = os.path.join(os.environ.get("LOCALAPPDATA", ""), "Voyage", "Sa
 RESEND_AFTER = 1.0
 GUARD_EVERY = 2.0
 CHUNKS_PER_LOOP = 200
+DISK_FULL = (112, 39)   # Windows: ERROR_DISK_FULL, ERROR_HANDLE_DISK_FULL
+
+
+def disk_full(e):
+    return getattr(e, "winerror", None) in DISK_FULL or e.errno == errno.ENOSPC
 
 
 GAME_EXE = "VoyageSteam-Win64-Shipping.exe"
@@ -294,7 +300,12 @@ class Bridge:
         if cmd == "guard":
             self.guarding = args[1] == "on"
             if self.guarding:
-                self.saves.guard_on()
+                try:
+                    self.saves.guard_on()
+                except OSError as e:
+                    self.guarding = False
+                    print(f"coopnet: vakten kunde inte slås på: {e}", flush=True)
+                    return [f"save|0|guardfail|{'disk' if disk_full(e) else 'other'}|{str(e).replace('|', '/')}"]
             else:
                 self.saves.guard_check()
                 self.saves.guard_off()
