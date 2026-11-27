@@ -234,6 +234,8 @@ local function notePosGap(st)
 end
 
 local function addPosSample(t)
+    -- The other game loaded a world and its clock started over.
+    if #posBuf > 0 and t.st < posBuf[#posBuf].st - 1 then posBuf, posOffset, jitterPeak = {}, nil, 0 posGap.lastRecv = nil end
     notePosGap(t.st)
     local off = realTime() - t.st
     -- The smallest offset is the one with the least delay; a much larger one
@@ -938,6 +940,9 @@ local function tick()
         props.reset() power.reset() drops.reset() doors.reset() prog.reset()
     end
     if levelName() == "Empty" then settledAt, calmSince, lastTickAt = nil, nil, nil end
+    -- GetRealTimeSeconds starts over with each world: with the old stamps kept, no own
+    -- position was sent and the other's new ones were dropped as older (user 2026-11-27).
+    if levelName() == "Empty" then lastPosSent, posOffset, jitterPeak, posRelaxedAt = -100, nil, 0, nil posGap.lastRecv, posGap.lastSt = nil, nil end
     if levelName() == "Empty" then worldSince = nil posReady, posBuf = false, {} death.reset() inv.reset() build.reset() boat.reset() weather.reset() ocean.reset() swarms.reset() npc.reset() loading.reset() boxes.reset() machines.reset() repair.reset() vehicles.reset() lamp.reset() phone.reset() paint.reset() gear.reset() zap.reset() drone.reset() mapicons.reset() terminals.reset() peerinv.reset() peerpower.reset() hostlost.reset() return end
     worldSince = worldSince or realTime()
     updateSettle()

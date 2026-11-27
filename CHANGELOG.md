@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.2.18 — 2026-11-27
+
+Hotfix: the players could not see each other, or saw each other with heavy lag, after the host went to the title screen and hosted again. Still a beta for 2 players; feedback is very welcome.
+
+- After the host changes world (Esc, title screen, host again) both players see each other right away, without lag
+
 ## 0.2.17 — 2026-11-27
 
 Fixes the boat stopping when the recycler runs while the other player drives, and the lag spike every couple of minutes. Still a beta for 2 players; feedback is very welcome.
